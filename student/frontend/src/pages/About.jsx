@@ -1,5 +1,4 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 import {
   Sparkles,
   Globe,
@@ -14,7 +13,8 @@ import {
   CheckCircle2,
   Award,
 } from 'lucide-react';
-import { nexusNetwork, companyContacts } from '../data/network';
+import { companyContacts } from '../data/network';
+import FacultyTabs from '../components/about/FacultyTabs';
 
 export default function About() {
   return (
@@ -86,46 +86,7 @@ export default function About() {
           </p>
         </div>
 
-        {/* Network Cards Grid matching dataset */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {nexusNetwork.map((member, idx) => (
-            <motion.div
-              key={member.id}
-              initial={{ opacity: 0, y: 15 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.4, delay: idx * 0.08 }}
-              className="p-6 rounded-3xl bg-white/95 dark:bg-[#0D1424]/85 backdrop-blur-xl border border-slate-200/90 dark:border-white/15 hover:border-cyan-500/50 shadow-xl shadow-slate-200/50 dark:shadow-2xl transition-all flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600/20 to-cyan-500/20 border border-slate-200 dark:border-white/10 flex items-center justify-center text-slate-900 dark:text-white font-bold text-lg">
-                    {member.name.split(' ')[1]?.[0] || member.name[0]}
-                  </div>
-                  <div>
-                    <h4 className="font-heading font-extrabold text-base sm:text-lg text-slate-900 dark:text-white leading-tight">
-                      {member.name}
-                    </h4>
-                    <span className="text-xs font-semibold text-cyan-600 dark:text-cyan-400 block mt-0.5">
-                      {member.role}
-                    </span>
-                  </div>
-                </div>
-
-                {member.highlights && member.highlights.length > 0 && (
-                  <div className="space-y-1.5 pt-3 border-t border-slate-100 dark:border-white/10">
-                    {member.highlights.map((h, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 font-medium">
-                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 shrink-0" />
-                        <span>{h}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          ))}
-        </div>
+        <FacultyTabs />
       </div>
 
       {/* Core Principles Grid */}

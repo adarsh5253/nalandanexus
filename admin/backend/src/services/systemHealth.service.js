@@ -49,7 +49,26 @@ export async function getSystemHealth() {
       detail: io ? `${io.sockets.sockets.size} admin client(s) connected` : 'Not initialized',
     },
     ...remoteChecks.map((c) => ({ name: c.name, status: c.status, detail: c.latencyMs !== null ? `${c.latencyMs}ms` : 'No response' })),
+    emailProviderCheck(),
   ];
+}
+
+/**
+ * Whether outbound email is set up at all - the first thing to rule out when
+ * teachers say a setup email never arrived. Reports configuration only; it
+ * sends nothing and cannot tell whether the provider will accept the sender
+ * address (that is answered per email, and recorded on each teacher). Never
+ * includes the key.
+ */
+function emailProviderCheck() {
+  const configured = Boolean(env.email.sendgridApiKey);
+  return {
+    name: 'Email provider (SendGrid)',
+    status: configured ? 'HEALTHY' : 'DEGRADED',
+    detail: configured
+      ? `Key configured · sending as ${env.email.from}`
+      : 'SENDGRID_API_KEY is not set - no email can be sent (teacher setup emails are logged, not delivered)',
+  };
 }
 
 export default { getSystemHealth };

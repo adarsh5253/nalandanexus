@@ -14,19 +14,60 @@ export const deliverMessageValidator = [
   body('text').trim().notEmpty().isLength({ max: 4000 }),
 ];
 
+// A setup link is identified across the service boundary by the SHA-256 of its
+// token (64 hex characters) and its expiry - never the token itself.
+const setupLinkRules = [
+  body('setupTokenHash').optional().isString().matches(/^[a-f0-9]{64}$/).withMessage('setupTokenHash must be a SHA-256 hex digest'),
+  body('setupTokenExpiresAt')
+    .optional()
+    .isISO8601()
+    .withMessage('setupTokenExpiresAt must be a date')
+    .custom((value) => new Date(value) > new Date())
+    .withMessage('setupTokenExpiresAt must be in the future'),
+];
+
 export const provisionTeacherValidator = [
   body('name').trim().notEmpty().isLength({ max: 120 }),
   body('email').trim().isEmail().normalizeEmail(),
   body('phone').optional({ nullable: true }).trim().isLength({ max: 20 }),
-  body('tempPassword').isString().isLength({ min: 8, max: 100 }),
-  body('title').optional({ nullable: true }).trim().isLength({ max: 120 }),
+  // Legacy: an administrator-issued temporary password. New callers send a setup
+  // link instead; one of the two is required.
+  body('tempPassword').optional().isString().isLength({ min: 8, max: 100 }),
+  ...setupLinkRules,
+  body().custom((value) => {
+    if (value.tempPassword) return true;
+    if (value.setupTokenHash && value.setupTokenExpiresAt) return true;
+    throw new Error('Either a setup link (setupTokenHash and setupTokenExpiresAt) or a tempPassword is required.');
+  }),
+  body('teacherId').optional({ nullable: true }).trim().matches(/^TCH-\d{4,}$/i).withMessage('teacherId must look like TCH-0001'),
+  body('avatarUrl').optional({ nullable: true }).trim().isLength({ max: 2000 }),
+  body('title').optional({ nullable: true }).trim().isLength({ max: 160 }),
   body('department').optional({ nullable: true }).trim().isLength({ max: 120 }),
   body('subject').optional({ nullable: true }).trim().isLength({ max: 120 }),
 ];
 
 export const resetCredentialsValidator = [
   body('email').trim().isEmail().normalizeEmail(),
-  body('newPassword').isString().isLength({ min: 8, max: 100 }),
+  // Legacy: reset to an administrator-issued temporary password.
+  body('newPassword').optional().isString().isLength({ min: 8, max: 100 }),
+  ...setupLinkRules,
+  body().custom((value) => {
+    if (value.newPassword) return true;
+    if (value.setupTokenHash && value.setupTokenExpiresAt) return true;
+    throw new Error('Either a setup link (setupTokenHash and setupTokenExpiresAt) or a newPassword is required.');
+  }),
+];
+
+/**
+ * The full set of courses an administrator has assigned to one teacher,
+ * identified by EMAIL (the identity both services share) and by the student
+ * catalogue's course slug. Sent as a set every time, so it replaces.
+ */
+export const setTeacherCoursesValidator = [
+  body('teacherEmail').trim().isEmail().normalizeEmail(),
+  body('courses').isArray({ max: 50 }),
+  body('courses.*.slug').isString().trim().matches(/^[a-z0-9-]{1,100}$/i).withMessage('A course slug is required'),
+  body('courses.*.title').optional({ nullable: true }).isString().trim().isLength({ max: 200 }),
 ];
 
 export const setAccountStatusValidator = [
@@ -44,6 +85,9 @@ export const assignCourseValidator = [
   body('image').optional({ nullable: true }).trim().isLength({ max: 500 }),
   body('priceInPaise').optional({ nullable: true }).isInt({ min: 0 }),
   body('status').optional({ nullable: true }).trim().isLength({ max: 40 }),
+  // The student catalogue slug this course is sold under, when it has one - what
+  // lets the teacher see the students enrolled in it.
+  body('studentCourseSlug').optional({ nullable: true }).trim().matches(/^[a-z0-9-]{1,100}$/i),
 ];
 
 export const adminAnnouncementValidator = [
@@ -105,6 +149,11 @@ export const portalStudentValidator = [
   body('enrollments.*.enrollmentId').isString().trim().notEmpty().isLength({ max: 40 }).matches(/^[A-Z0-9-]+$/i),
   body('enrollments.*.status').isIn(['active', 'revoked']),
   body('enrollments.*.batchId').optional({ nullable: true }).isString().isLength({ max: 40 }),
+  // Which course the enrolment is in, so the course-wide roster can place it.
+  // The slug is catalogue information; no title or price is sent.
+  body('enrollments.*.courseSlug').optional({ nullable: true }).isString().trim().matches(/^[a-z0-9-]{1,100}$/i),
+  body('enrollments.*.batchCode').optional({ nullable: true }).isString().isLength({ max: 80 }),
+  body('enrollments.*.enrolledAt').optional({ nullable: true }).isISO8601(),
   body('sourceUpdatedAt').isISO8601(),
 ];
 
@@ -158,6 +207,7 @@ export default {
   deliverMessageValidator,
   provisionTeacherValidator,
   resetCredentialsValidator,
+  setTeacherCoursesValidator,
   setAccountStatusValidator,
   sourceIdParamValidator,
   assignCourseValidator,

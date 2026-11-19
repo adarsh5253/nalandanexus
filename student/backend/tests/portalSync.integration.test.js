@@ -202,7 +202,10 @@ test('a student with a complete profile reaches both portals by name and number 
   const teacher = latest(teacherPeer, s.userId);
   assert.equal(teacher.fullName, 'Aarav Sharma');
   assert.equal(teacher.enrollmentNumber, number);
-  assert.deepEqual(Object.keys(teacher.enrollments[0]).sort(), ['batchId', 'enrolledAt', 'enrollmentId', 'status']);
+  assert.deepEqual(Object.keys(teacher.enrollments[0]).sort(), ['batchCode', 'batchId', 'courseSlug', 'enrolledAt', 'enrollmentId', 'status']);
+  assert.equal(teacher.enrollments[0].courseSlug, 'sync-a', 'the slug lets the course-wide roster place the student');
+  assert.equal(JSON.stringify(teacher).includes('Course sync-a'), false, 'but no course title goes with it');
+  assert.equal(JSON.stringify(teacher).includes('99900'), false, 'and no price');
   assert.equal(teacher.enrollments[0].batchId, '64b0000000000000000000b1');
 
   for (const body of [admin, teacher]) {

@@ -28,5 +28,10 @@ const taskSubmissionSchema = new Schema(
 );
 
 taskSubmissionSchema.index({ userId: 1, taskId: 1 }, { unique: true });
+// Serves the dashboard's "did this student complete anything that day" probe
+// (services/performance.service.js), which filters on userId + isCompleted and
+// ranges over completedAt. The unique index above is keyed on taskId, so it
+// cannot serve the range; this one does it entirely from the index.
+taskSubmissionSchema.index({ userId: 1, isCompleted: 1, completedAt: -1 });
 
 export const TaskSubmission = mongoose.model('TaskSubmission', taskSubmissionSchema);

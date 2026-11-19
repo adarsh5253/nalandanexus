@@ -38,6 +38,42 @@ export async function connectDB(uriOverride) {
   // Do not let the server run silently against a broken DB.
   await mongoose.connect(uri, {
     serverSelectionTimeoutMS: 8000,
+
+    /**
+     * Connection pool. Mongoose's default is maxPoolSize 100, which on a
+     * single small instance means a burst of traffic can open far more
+     * connections to Atlas than the tier allows - and Atlas then refuses
+     * them, which surfaces in the browser as requests that hang until their
+     * own timeout. 20 is comfortably above this service's real concurrency
+     * and well inside the connection limit.
+     *
+     * minPoolSize keeps a few sockets warm so a request arriving after an
+     * idle period does not pay for a fresh TCP + TLS + auth handshake before
+     * its first query - that handshake is a large part of why the first page
+     * load after a quiet spell felt slow.
+     */
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 20,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 2,
+
+    /**
+     * A query that cannot be served promptly must fail rather than hold a
+     * request open. Without this a stalled operation kept its HTTP request
+     * pending indefinitely, which is the server-side half of the hanging
+     * requests the frontends were spinning on.
+     */
+    socketTimeoutMS: 45000,
+
+    /**
+     * Index builds belong in a deploy step, not on the hot path of a boot.
+     * With autoIndex left at its default of true, every cold start walked
+     * every schema and issued createIndex for all of them before the process
+     * could usefully serve traffic - on this instance, which sleeps when idle,
+     * that cost was paid on the first request of every quiet period. The
+     * sibling teacher and admin services already disable it in production;
+     * this one did not. Indexes are still created automatically in
+     * development and test, where schemas change.
+     */
+    autoIndex: env.nodeEnv !== 'production',
   });
 
   return mongoose.connection;

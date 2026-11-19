@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-route
 import Navbar from './components/navbar/Navbar';
 import Footer from './components/footer/Footer';
 import ScrollToTop from './components/common/ScrollToTop';
+import ErrorBoundary from './components/common/ErrorBoundary';
+import OfflineBanner from './components/common/OfflineBanner';
 import { Analytics } from "@vercel/analytics/react"
 // Context Providers
 import { AuthProvider } from './context/AuthContext';
@@ -43,11 +45,80 @@ const HelpSupportPage = lazy(() => import('./pages/student/HelpSupportPage'));
 
 import { toggleSound, isSoundEnabled } from './utils/sound';
 
+/**
+ * Shown while a route's lazy chunk downloads.
+ *
+ * Deliberately NOT a full-viewport spinner. The previous route's content stays
+ * mounted underneath until the new chunk resolves, so replacing the whole
+ * viewport with a centred spinner blanked the page on every single navigation
+ * and then shifted the layout again when the real page arrived. A fixed 2px
+ * bar at the top cannot move anything and reads as "working" rather than
+ * "broken". `min-h-screen` keeps the document tall enough that the footer
+ * does not jump up during the swap.
+ */
 function RouteLoadingFallback() {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center">
-      <div className="w-8 h-8 border-2 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin" />
+    <>
+      <div className="route-progress" role="progressbar" aria-label="Loading page" aria-busy="true" />
+      <div className="min-h-screen" aria-hidden="true" />
+    </>
+  );
+}
+
+/**
+ * A chunk that fails to download (a deploy that rotated the asset hashes while
+ * someone had the tab open, or a dropped connection mid-navigation) throws
+ * from the lazy import. Without this it reached the top of the tree and blanked
+ * the app; a chunk load is also the one error where reloading genuinely fixes
+ * it, so that is offered first.
+ */
+function RouteErrorFallback({ error, reset }) {
+  const isChunkError = /dynamically imported module|Importing a module script failed|Loading chunk/i.test(
+    String(error?.message || '')
+  );
+
+  return (
+    <div className="min-h-screen w-full flex items-center justify-center p-6">
+      <div className="max-w-md w-full text-center space-y-4">
+        <h2 className="font-heading font-bold text-lg text-slate-900 dark:text-white">
+          {isChunkError ? 'This page could not be downloaded' : 'This page failed to load'}
+        </h2>
+        <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+          {isChunkError
+            ? 'Part of the app is missing or out of date — this usually means a new version was released while this tab was open. Reloading will pick it up.'
+            : 'Something went wrong rendering this page. Your session is intact.'}
+        </p>
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 text-white text-xs font-bold shadow-lg hover:opacity-90 transition-opacity"
+          >
+            Reload page
+          </button>
+          <button
+            type="button"
+            onClick={reset}
+            className="px-5 py-2.5 rounded-xl border border-slate-300 dark:border-white/15 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
     </div>
+  );
+}
+
+/**
+ * Resets the route-level boundary whenever the URL changes, so a page that
+ * errored does not keep its error state after the user navigates away from it.
+ */
+function RouteBoundary({ children }) {
+  const location = useLocation();
+  return (
+    <ErrorBoundary key={location.pathname} fallback={RouteErrorFallback}>
+      {children}
+    </ErrorBoundary>
   );
 }
 
@@ -106,16 +177,22 @@ export default function App() {
   }, [darkMode]);
 
   return (
-    <AuthProvider>
-      <StudentProvider>
-        <BrowserRouter>
-          <ScrollToTop />
-          <LayoutWrapper
+    <ErrorBoundary
+      title="Nalanda Nexus could not start"
+      description="Something went wrong before the app finished loading. Reloading usually clears it."
+    >
+      <AuthProvider>
+        <StudentProvider>
+          <BrowserRouter>
+            <ScrollToTop />
+            <OfflineBanner />
+            <LayoutWrapper
             soundOn={soundOn}
             onToggleSound={() => setSoundOn(toggleSound())}
             darkMode={darkMode}
             onToggleTheme={() => setDarkMode((prev) => !prev)}
           >
+            <RouteBoundary>
             <Suspense fallback={<RouteLoadingFallback />}>
               <Routes>
                 {/* Public Home Landing Page */}
@@ -192,9 +269,11 @@ export default function App() {
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </Suspense>
-          </LayoutWrapper>
-        </BrowserRouter>
-      </StudentProvider>
-    </AuthProvider>
+            </RouteBoundary>
+            </LayoutWrapper>
+          </BrowserRouter>
+        </StudentProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

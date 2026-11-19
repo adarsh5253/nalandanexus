@@ -14,6 +14,8 @@ router.get('/courses/:slug', attachUserIfPresent, publicController.getCourseBySl
 router.get('/courses/:slug/reviews', reviewController.listCourseReviews);
 router.get('/announcements', publicController.listPublicAnnouncements);
 router.get('/resources', publicController.listPublicResources);
+// The faculty the About page introduces, published by the admin portal.
+router.get('/faculty', publicController.listPublicFaculty);
 router.get('/stats', publicController.listPublicStats);
 router.get('/highlights', publicController.listPublicHighlights);
 router.post('/contact', validate(contactSchema), publicController.submitContactMessage);

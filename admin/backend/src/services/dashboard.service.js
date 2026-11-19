@@ -4,7 +4,7 @@ import { Course } from '../models/Course.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { Settings } from '../models/Settings.js';
 import { computeLeaderboard } from './leaderboard.service.js';
-import { bucketByRange, timeAgo } from '../utils/time.js';
+import { rangeBuckets, BUCKET_RANGES, timeAgo } from '../utils/time.js';
 import { emitEvent } from '../sockets/index.js';
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -103,20 +103,90 @@ async function computeNeedsAttention() {
   return items;
 }
 
+/**
+ * Real signal used as the activity proxy: this backend's own audit trail
+ * (every admin write is recorded there). There is no separate student
+ * session-tracking system owned by admin/backend to source "active
+ * sessions" from — see implementation report for the cross-service gap.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this is an aggregation and not a `find()`
+ * ---------------------------------------------------------------------------
+ * This used to load EVERY audit log row from the last 370 days into this
+ * process - `AuditLog.find({ createdAt: { $gte: since } })` with no limit -
+ * and then walk that array four times in JavaScript to fill the four series.
+ * On every single admin overview load.
+ *
+ * The audit log gains a row on every administrative write, so that read has no
+ * upper bound: the overview got progressively slower for the whole team as the
+ * platform was used, which is precisely backwards. The counting is now done
+ * inside MongoDB, which returns at most 18 rows (7 + 4 + 3 + 4 buckets)
+ * however large the collection grows.
+ *
+ * The bucket boundaries still come from the same `rangeBuckets` definition the
+ * JavaScript path uses, so the windows cannot drift apart, and a single `now`
+ * is shared across all four series - previously each called `new Date()` for
+ * itself, so the four charts were anchored milliseconds apart.
+ */
 async function computeLearningActivity() {
-  // Real signal used as the activity proxy: this backend's own audit trail
-  // (every admin write is recorded there). There is no separate student
-  // session-tracking system owned by admin/backend to source "active
-  // sessions" from — see implementation report for the cross-service gap.
-  const since = new Date(Date.now() - 370 * 24 * 60 * 60 * 1000);
-  const docs = await AuditLog.find({ createdAt: { $gte: since } }).select('createdAt entityType').lean();
+  const now = new Date();
+  const bucketsByRange = Object.fromEntries(BUCKET_RANGES.map((r) => [r, rangeBuckets(r, now)]));
 
-  return {
-    '7d': bucketByRange(docs, '7d'),
-    '30d': bucketByRange(docs, '30d'),
-    '3m': bucketByRange(docs, '3m'),
-    '1y': bucketByRange(docs, '1y'),
-  };
+  // The earliest instant any series covers. Anything older cannot land in a
+  // bucket, so it is excluded before the grouping rather than fetched and
+  // discarded (which is what the old `370 days` window did).
+  const since = new Date(
+    Math.min(...Object.values(bucketsByRange).map((buckets) => buckets[0].start.getTime()))
+  );
+
+  /**
+   * One `$facet` with a `$bucket` per range, so all four series are computed
+   * in a single pass over the same indexed range scan.
+   *
+   * `default: 'out-of-range'` is required: without it `$bucket` errors on any
+   * document that falls outside the boundaries, and a row sitting between two
+   * series' windows legitimately does. That bucket is read and dropped below,
+   * matching the JavaScript's `if (!bucket) continue`.
+   */
+  const facet = {};
+  for (const [range, buckets] of Object.entries(bucketsByRange)) {
+    facet[range] = [
+      {
+        $bucket: {
+          groupBy: '$createdAt',
+          // Contiguous windows: every bucket's start is the previous one's end.
+          boundaries: [buckets[0].start, ...buckets.map((b) => b.end)],
+          default: 'out-of-range',
+          output: {
+            activeSessions: { $sum: 1 },
+            submissions: { $sum: { $cond: [{ $eq: ['$entityType', 'Enrollment'] }, 1, 0] } },
+          },
+        },
+      },
+    ];
+  }
+
+  const [facetResult] = await AuditLog.aggregate([{ $match: { createdAt: { $gte: since } } }, { $facet: facet }]);
+
+  // `$bucket` omits empty buckets entirely; the chart needs every bucket
+  // present with a real 0 so it draws a flat line instead of a gap.
+  const activity = {};
+  for (const [range, buckets] of Object.entries(bucketsByRange)) {
+    const counts = new Map(
+      (facetResult?.[range] || [])
+        .filter((row) => row._id !== 'out-of-range')
+        .map((row) => [new Date(row._id).getTime(), row])
+    );
+    activity[range] = buckets.map((b) => {
+      const row = counts.get(b.start.getTime());
+      return {
+        name: b.name,
+        activeSessions: row?.activeSessions || 0,
+        submissions: row?.submissions || 0,
+      };
+    });
+  }
+  return activity;
 }
 
 async function computeRecentActivity() {

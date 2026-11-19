@@ -14,6 +14,8 @@ import ParambhJourney from '../../components/student/ParambhJourney';
 import MyEnrollmentCard from '../../components/student/MyEnrollmentCard';
 import LearnerProfileCard from '../../components/student/LearnerProfileCard';
 import JourneyCard from '../../components/student/JourneyCard';
+import ErrorState from '../../components/common/ErrorState';
+import { DashboardSkeleton } from '../../components/common/Skeletons';
 import { useProgression } from '../../hooks/useProgression';
 
 export default function StudentDashboardPage() {
@@ -23,33 +25,25 @@ export default function StudentDashboardPage() {
   // reflects what the backend computed rather than a locally-guessed total.
   const { progression, isLoading: isLoadingProgression } = useProgression();
 
-  if (isLoadingDashboard && !student) {
+  // Order matters: a failed load is reported even while a retry is in flight
+  // below, but the error is checked first so a request that failed and is not
+  // being retried can never read as "still loading".
+  if (dashboardError && !student) {
     return (
-      <div className="min-h-screen bg-[#EDEAE0] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 border-3 border-[#22355E]/20 border-t-[#22355E] rounded-full animate-spin" />
-          <p className="text-xs font-semibold text-[#22355E] tracking-wider uppercase">Loading your dashboard...</p>
-        </div>
+      <div className="min-h-screen bg-[#EDEAE0] flex items-center justify-center p-4">
+        <ErrorState
+          title="Unable to load your dashboard"
+          error={dashboardError}
+          onRetry={refreshData}
+        />
       </div>
     );
   }
 
-  if (dashboardError && !student) {
-    return (
-      <div className="min-h-screen bg-[#EDEAE0] flex items-center justify-center p-4">
-        <div className="text-center space-y-3 max-w-sm">
-          <p className="font-heading font-bold text-[#22355E]">Unable to load your dashboard.</p>
-          <p className="text-xs text-[#2B2B28]/70">{dashboardError}</p>
-          <button
-            type="button"
-            onClick={refreshData}
-            className="px-5 py-2.5 bg-[#AB5236] hover:bg-[#92422a] text-white font-heading font-bold text-xs rounded-xl shadow-xs transition-colors"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
+  // The dashboard's own shape rather than a centred spinner, so the swap to
+  // real content does not move anything on the page.
+  if (isLoadingDashboard && !student) {
+    return <DashboardSkeleton />;
   }
 
   const isFirstLogin = !hasCompletedOnboarding();

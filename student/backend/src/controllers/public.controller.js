@@ -6,6 +6,7 @@ import { ContactMessage } from '../models/ContactMessage.js';
 import { Enrollment } from '../models/Enrollment.js';
 import { Announcement } from '../models/Announcement.js';
 import { Resource } from '../models/Resource.js';
+import { Faculty } from '../models/Faculty.js';
 import { User } from '../models/User.js';
 import { TaskSubmission } from '../models/TaskSubmission.js';
 import { Post } from '../models/Post.js';
@@ -272,6 +273,37 @@ export const listPublicHighlights = asyncHandler(async (req, res) => {
         author: p.userId.name?.split(' ')[0] || 'A learner',
         avatar: p.userId.avatar || null,
       })),
+  });
+});
+
+/**
+ * The teaching faculty, for the About page, in the institution's own order.
+ *
+ * Published from the admin portal (models/Faculty.js), so introducing an
+ * instructor is an administrative act rather than a deploy - the page used to
+ * read a hardcoded list. Only published profiles are returned, and the
+ * collection holds nothing that is not public in the first place.
+ */
+export const listPublicFaculty = asyncHandler(async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+
+  const items = await Faculty.find({ isPublished: true })
+    .sort({ order: 1, name: 1 })
+    .limit(limit)
+    .select('name role category expertise experience avatar order')
+    .lean();
+
+  return sendSuccess(res, {
+    data: items.map((f) => ({
+      id: String(f._id),
+      name: f.name,
+      role: f.role || null,
+      category: f.category || 'Faculty',
+      expertise: f.expertise || [],
+      experience: f.experience || null,
+      avatar: f.avatar || null,
+      order: f.order ?? 0,
+    })),
   });
 });
 

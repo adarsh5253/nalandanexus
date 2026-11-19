@@ -1,6 +1,14 @@
 import { catchAsync } from '../utils/catchAsync.js';
 import { sendSuccess } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import * as teacherService from '../services/teacher.service.js';
+import { storeTeacherPhoto } from '../services/fileStorage.service.js';
+
+/** The password hash is never part of an API response, even where Mongoose would have included it. */
+function safe(teacher) {
+  const { passwordHash, ...rest } = teacher.toObject ? teacher.toObject() : teacher;
+  return rest;
+}
 
 export const list = catchAsync(async (req, res) => {
   const { items, meta } = await teacherService.listTeachers(req.query);
@@ -9,21 +17,22 @@ export const list = catchAsync(async (req, res) => {
 
 export const getById = catchAsync(async (req, res) => {
   const teacher = await teacherService.getTeacherById(req.params.id);
-  return sendSuccess(res, { data: teacher });
+  // Courses an administrator authored and made this teacher instructor of are a
+  // different thing from the catalogue courses assigned to them; the profile
+  // shows both.
+  const authoredCourses = await teacherService.getTeacherAuthoredCourses(teacher._id);
+  return sendSuccess(res, { data: { ...safe(teacher), authoredCourses } });
 });
 
 export const create = catchAsync(async (req, res) => {
-  const { teacher, warnings, tempPasswordFallback } = await teacherService.createTeacher(req.body, req.admin, req);
+  const { teacher, warnings, setupLinkExpiresAt } = await teacherService.createTeacher(req.body, req.admin, req);
   const message = warnings.length
     ? 'Teacher created, but needs attention — see warnings.'
-    : 'Teacher created and Teacher Portal access provisioned successfully.';
-  // `select: false` on Teacher.passwordHash only affects query projections,
-  // not a document just returned from `.create()` — strip it explicitly so
-  // the hash never reaches the response.
-  const { passwordHash, ...safeTeacher } = teacher.toObject();
+    : 'Teacher created. A password-setup email has been sent.';
   return sendSuccess(res, {
     statusCode: 201,
-    data: { ...safeTeacher, tempPasswordFallback },
+    // No password of any kind is returned: none was generated for anyone to see.
+    data: { ...safe(teacher), setupLinkExpiresAt },
     message,
     meta: { warnings },
   });
@@ -31,7 +40,24 @@ export const create = catchAsync(async (req, res) => {
 
 export const update = catchAsync(async (req, res) => {
   const teacher = await teacherService.updateTeacher(req.params.id, req.body, req.admin, req);
-  return sendSuccess(res, { data: teacher, message: 'Teacher updated successfully' });
+  return sendSuccess(res, { data: safe(teacher), message: 'Teacher updated successfully' });
+});
+
+export const setCourses = catchAsync(async (req, res) => {
+  const { teacher, warnings } = await teacherService.setTeacherCourses(req.params.id, req.body.courseSlugs, req.admin, req);
+  const message = warnings.length
+    ? 'Courses saved, but the Teacher Portal has not received them — see warnings.'
+    : 'Courses assigned. Their enrolled students are now visible to the teacher.';
+  return sendSuccess(res, { data: safe(teacher), message, meta: { warnings } });
+});
+
+/** Stores the teacher's profile photo durably and points the record, the Teacher Portal and the public profile at it. */
+export const uploadPhoto = catchAsync(async (req, res) => {
+  if (!req.file) throw ApiError.badRequest('Choose an image to upload.', 'FILE_REQUIRED');
+  const teacher = await teacherService.getTeacherById(req.params.id);
+  const url = await storeTeacherPhoto({ ownerId: teacher._id, file: req.file });
+  const updated = await teacherService.updateTeacher(req.params.id, { avatar: url }, req.admin, req);
+  return sendSuccess(res, { data: safe(updated), message: 'Photo updated' });
 });
 
 export const remove = catchAsync(async (req, res) => {
@@ -44,13 +70,13 @@ export const resendInvite = catchAsync(async (req, res) => {
   return sendSuccess(res, { message: 'Invitation resent' });
 });
 
+/** Sends a new password-setup link. Also what "reset password" does - there is no other way to set one. */
 export const resendCredentials = catchAsync(async (req, res) => {
-  const { teacher, warnings, tempPasswordFallback } = await teacherService.resendCredentials(req.params.id, req.admin, req);
+  const { teacher, warnings, setupLinkExpiresAt } = await teacherService.resendCredentials(req.params.id, req.admin, req);
   const message = warnings.length
-    ? 'Credentials resent, but needs attention — see warnings.'
-    : 'New credentials generated and emailed successfully.';
-  const { passwordHash, ...safeTeacher } = teacher.toObject();
-  return sendSuccess(res, { data: { ...safeTeacher, tempPasswordFallback }, message, meta: { warnings } });
+    ? 'A new setup link could not be fully sent — see warnings.'
+    : 'A new password-setup email has been sent. Any earlier link no longer works.';
+  return sendSuccess(res, { data: { ...safe(teacher), setupLinkExpiresAt }, message, meta: { warnings } });
 });
 
 export const revokeInvite = catchAsync(async (req, res) => {
@@ -60,17 +86,12 @@ export const revokeInvite = catchAsync(async (req, res) => {
 
 export const suspend = catchAsync(async (req, res) => {
   const teacher = await teacherService.suspendTeacher(req.params.id, req.body.reason, req.admin, req);
-  return sendSuccess(res, { data: teacher, message: 'Teacher suspended' });
+  return sendSuccess(res, { data: safe(teacher), message: 'Teacher suspended' });
 });
 
 export const reactivate = catchAsync(async (req, res) => {
   const teacher = await teacherService.reactivateTeacher(req.params.id, req.admin, req);
-  return sendSuccess(res, { data: teacher, message: 'Teacher reactivated' });
-});
-
-export const resetPassword = catchAsync(async (req, res) => {
-  await teacherService.requestPasswordReset(req.params.id, req.admin, req);
-  return sendSuccess(res, { message: 'Password reset email sent' });
+  return sendSuccess(res, { data: safe(teacher), message: 'Teacher reactivated' });
 });
 
 export const verifyInvite = catchAsync(async (req, res) => {
@@ -83,4 +104,4 @@ export const activate = catchAsync(async (req, res) => {
   return sendSuccess(res, { data, message: 'Account activated successfully' });
 });
 
-export default { list, getById, create, update, remove, resendInvite, resendCredentials, revokeInvite, suspend, reactivate, resetPassword, verifyInvite, activate };
+export default { list, getById, create, update, setCourses, uploadPhoto, remove, resendInvite, resendCredentials, revokeInvite, suspend, reactivate, verifyInvite, activate };

@@ -42,9 +42,23 @@ const userSchema = new Schema(
     // blocks every route outside /api/teacher/auth/* so the temp password
     // can only ever be used to change itself, never to access the portal.
     mustChangePassword: { type: Boolean, default: false },
+
+    // Password setup by emailed link (see services/auth.service.js#completePasswordSetup).
+    // An account an administrator creates is given a random password nobody
+    // knows, and the person sets their own through a single-use, time-limited
+    // link - so no password is ever chosen by, shown to, or emailed by anyone
+    // else. Only the SHA-256 of the link's token is stored: a database read
+    // cannot be turned into a working link. Cleared the moment it is used.
+    setupTokenHash: { type: String, select: false, default: undefined },
+    setupTokenExpiresAt: { type: Date, select: false, default: undefined },
+    // When the person last chose their own password; null for an account still
+    // waiting on its first setup.
+    passwordSetAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
+
+userSchema.index({ setupTokenHash: 1 }, { sparse: true });
 
 userSchema.index({ role: 1, status: 1 });
 

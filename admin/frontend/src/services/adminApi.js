@@ -52,7 +52,65 @@ function toResourceFormData(resourceData) {
   return form;
 }
 
-async function request(path, { method = 'GET', body, query, isFormData = false } = {}) {
+/**
+ * Every request carries a deadline, and every transport-level failure is
+ * translated into a readable `Error` with a code.
+ *
+ * Two problems lived here before. `fetch` has no timeout of its own, so a
+ * backend that accepts the connection and then never answers left the console
+ * waiting forever - the promise never settled, so the pages' own `finally`
+ * blocks never cleared their loading flags. And a connection that failed
+ * outright rejected with a raw `TypeError: Failed to fetch`, which reached the
+ * UI verbatim as the error message shown to an administrator.
+ *
+ * The session and sign-in calls get longer, because the API is hosted on an
+ * instance that sleeps when idle and takes ~25s to answer the first request.
+ */
+const DEFAULT_TIMEOUT_MS = 20000;
+const COLD_START_TIMEOUT_MS = 45000;
+// Lesson-video calls are proxied to the student service, which sleeps when
+// idle too, so they get the same budget as a cold sign-in.
+const COLD_START_PATHS = ['/auth/me', '/auth/login', '/lesson-videos'];
+
+function timeoutFor(path) {
+  return COLD_START_PATHS.some((p) => path.startsWith(p)) ? COLD_START_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
+
+export function isAbortError(err) {
+  return err?.name === 'AbortError' || err?.code === 'CANCELLED';
+}
+
+async function fetchWithTimeout(url, options, timeoutMs, externalSignal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), timeoutMs);
+  const onExternalAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+function transportError(message, code) {
+  const error = new Error(message);
+  error.status = 0;
+  error.code = code;
+  error.isRetryable = true;
+  return error;
+}
+
+// A course video belongs to one lesson or one module.
+function courseVideoPath(slug, target) {
+  const node = target.moduleId ? `modules/${encodeURIComponent(target.moduleId)}` : `lessons/${encodeURIComponent(target.lessonId)}`;
+  return `/lesson-videos/courses/${encodeURIComponent(slug)}/${node}`;
+}
+
+async function request(path, { method = 'GET', body, query, isFormData = false, signal } = {}) {
   const url = new URL(`${API_BASE}${path}`);
   if (query) {
     Object.entries(query).forEach(([key, value]) => {
@@ -60,18 +118,45 @@ async function request(path, { method = 'GET', body, query, isFormData = false }
     });
   }
 
-  const res = await fetch(url.toString(), {
-    method,
-    // Sends the httpOnly session cookie. The API is on a different origin, so
-    // without this the browser omits it and every request is unauthenticated.
-    credentials: 'include',
-    headers: {
-      // multipart/form-data needs its own auto-generated boundary — the
-      // browser sets Content-Type itself when the body is a FormData.
-      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-    },
-    body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
-  });
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw transportError('You appear to be offline. Check your connection and try again.', 'OFFLINE');
+  }
+
+  let res;
+  try {
+    res = await fetchWithTimeout(
+      url.toString(),
+      {
+        method,
+        // Sends the httpOnly session cookie. The API is on a different origin, so
+        // without this the browser omits it and every request is unauthenticated.
+        credentials: 'include',
+        headers: {
+          // multipart/form-data needs its own auto-generated boundary — the
+          // browser sets Content-Type itself when the body is a FormData.
+          ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
+      },
+      timeoutFor(path),
+      signal
+    );
+  } catch (err) {
+    // A caller-initiated abort means the UI moved on, not that anything failed.
+    if (signal?.aborted) {
+      const cancelled = new Error('Request cancelled.');
+      cancelled.name = 'AbortError';
+      cancelled.code = 'CANCELLED';
+      throw cancelled;
+    }
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw transportError('The server took too long to respond. Please try again.', 'TIMEOUT');
+    }
+    throw transportError(
+      'Could not reach the Nalanda Admin server. Check your connection and that the backend is running.',
+      'NETWORK_ERROR'
+    );
+  }
 
   if (res.status === 401) {
     // Session is gone (expired/revoked/never existed) — let the auth
@@ -97,6 +182,9 @@ async function request(path, { method = 'GET', body, query, isFormData = false }
     error.status = res.status;
     error.code = detail.code;
     error.errors = detail.details || detail.errors;
+    // A server-side fault is worth offering a retry for; a 4xx is the caller's
+    // to fix and retrying it unchanged would fail the same way.
+    error.isRetryable = res.status >= 500;
     throw error;
   }
 
@@ -216,6 +304,18 @@ export const adminApi = {
 
   async deleteTeacher(id) {
     return request(`/teachers/${id}`, { method: 'DELETE' });
+  },
+
+  /** Replaces the courses assigned to a teacher (by catalogue slug). The Teacher Portal's student visibility follows. */
+  async setTeacherCourses(id, courseSlugs) {
+    return request(`/teachers/${id}/courses`, { method: 'PUT', body: { courseSlugs } });
+  },
+
+  /** Uploads a teacher's profile photo (stored durably server-side). */
+  async uploadTeacherPhoto(id, file) {
+    const form = new FormData();
+    form.append('photo', file);
+    return request(`/teachers/${id}/photo`, { method: 'POST', body: form, isFormData: true });
   },
 
   async resendInvite(id) {
@@ -436,6 +536,34 @@ export const adminApi = {
 
   async setCourseSubjects(slug, payload) {
     const json = await request(`/course-content/${encodeURIComponent(slug)}/subjects`, { method: 'PATCH', body: payload });
+    return json.data;
+  },
+
+  // Lesson videos (YouTube). Proxied to the student service, which owns
+  // lessons and validates every link; this portal gates and audits.
+  async getLessonVideoCourses() {
+    const json = await request('/lesson-videos/courses');
+    return json.data || [];
+  },
+
+  async getLessonVideos(slug) {
+    const json = await request(`/lesson-videos/courses/${encodeURIComponent(slug)}`);
+    return json.data || null;
+  },
+
+  async inspectLessonVideo(url, { signal } = {}) {
+    const json = await request('/lesson-videos/inspect', { method: 'POST', body: { url }, signal });
+    return json.data || null;
+  },
+
+  // target is { lessonId } or { moduleId }.
+  async saveCourseVideo(slug, target, payload) {
+    const json = await request(courseVideoPath(slug, target), { method: 'PUT', body: payload });
+    return json.data;
+  },
+
+  async removeCourseVideo(slug, target, payload = {}) {
+    const json = await request(courseVideoPath(slug, target), { method: 'DELETE', body: payload });
     return json.data;
   },
 

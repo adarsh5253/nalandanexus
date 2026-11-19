@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { ArrowRight, Play, Star } from 'lucide-react';
 import HeroVisual from './HeroVisual';
 import PrarambhModal from './PrarambhModal';
+import AnimatedTagline from '../brand/AnimatedTagline';
 import { playTone } from '../../utils/sound';
 
 export default function Hero() {
@@ -36,6 +37,11 @@ export default function Hero() {
                 Empowering the Digital Generation
               </span>
             </div>
+
+            {/* Brand tagline — animated word by word, sits between the badge
+                and the H1 so it reads as a kicker to the headline rather than
+                competing with it. */}
+            <AnimatedTagline className="mb-5" />
 
             {/* Giant Heading matching exact template */}
             <h1 className="font-heading font-extrabold text-5xl sm:text-6xl md:text-7xl lg:text-[78px] tracking-tight leading-[1.06] mb-6">

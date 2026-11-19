@@ -15,7 +15,8 @@ import WorkloadSummary from '../components/dashboard/WorkloadSummary';
 import TodaysSchedule from '../components/dashboard/TodaysSchedule';
 import LiveClassPanel from '../components/dashboard/LiveClassPanel';
 import StudentDrillDownDrawer from '../components/students/StudentDrillDownDrawer';
-import { StatSkeleton, ChartSkeleton } from '../components/common/SkeletonLoaders';
+import { DashboardSkeleton } from '../components/common/SkeletonLoaders';
+import ErrorState from '../components/common/ErrorState';
 
 export default function DashboardPage() {
   const navigate = useNavigate();
@@ -50,33 +51,20 @@ export default function DashboardPage() {
   const handleViewStrugglingStudents = (conceptId) => navigate('/students');
   const handleLaunchLiveClass = (item) => navigate('/calendar');
 
-  if (isLoading) {
+  // Checked before `isLoading` so a request that failed and is not being
+  // retried can never read as "still loading".
+  if (error) {
     return (
-      <div className="space-y-6 sm:space-y-8 max-w-7xl mx-auto pb-12">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5 sm:gap-4">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <StatSkeleton key={i} />
-          ))}
-        </div>
-        <ChartSkeleton />
-        <ChartSkeleton />
+      <div className="max-w-7xl mx-auto pb-12">
+        <ErrorState title="Unable to load your dashboard" error={error} onRetry={refetch} />
       </div>
     );
   }
 
-  if (error) {
+  if (isLoading) {
     return (
       <div className="max-w-7xl mx-auto pb-12">
-        <div className="p-5 rounded-2xl bg-[#C1352B]/10 border border-[#C1352B]/30 text-[#C1352B] text-sm flex items-center justify-between gap-4">
-          <span>{error}</span>
-          <button
-            type="button"
-            onClick={refetch}
-            className="px-3 py-1.5 rounded-xl bg-[#C1352B] text-white text-xs font-bold hover:bg-[#a92c23] transition-colors flex-shrink-0"
-          >
-            Retry
-          </button>
-        </div>
+        <DashboardSkeleton />
       </div>
     );
   }

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { adminApi } from '../services/adminApi';
 import { disconnectSocket } from '../services/socket';
 
@@ -103,17 +103,25 @@ export function AdminAuthProvider({ children }) {
     return parts[0];
   }, [user]);
 
-  const value = {
-    user,
-    isAuthenticated: Boolean(user),
-    isLoading,
-    error,
-    login,
-    logout,
-    hasRole,
-    hasPermission,
-    getFirstName,
-  };
+  // Memoised so the provider does not hand every consumer a new object on each
+  // render: a context value rebuilt inline has a fresh identity every time,
+  // which makes `useContext` fire in every subscriber regardless of whether
+  // anything it reads actually changed. The callbacks below are all
+  // `useCallback`-stable, so this only changes when real session state does.
+  const value = useMemo(
+    () => ({
+      user,
+      isAuthenticated: Boolean(user),
+      isLoading,
+      error,
+      login,
+      logout,
+      hasRole,
+      hasPermission,
+      getFirstName,
+    }),
+    [user, isLoading, error, login, logout, hasRole, hasPermission, getFirstName]
+  );
 
   return <AdminAuthContext.Provider value={value}>{children}</AdminAuthContext.Provider>;
 }

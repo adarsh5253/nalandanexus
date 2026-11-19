@@ -33,6 +33,46 @@ export function resolveAssetUrl(pathOrUrl) {
   return pathOrUrl;
 }
 
+/**
+ * Every request carries a deadline.
+ *
+ * `fetch` has no timeout of its own: a request to a host that accepts the
+ * connection and then never answers stays pending for as long as the tab is
+ * open. That is what left the dashboard, the enrollment gate and the course
+ * screens spinning with no error and no way out - the promise simply never
+ * settled, so no `catch` and no `finally` ever ran. An AbortController gives
+ * every request an upper bound, and an aborted request surfaces as a normal
+ * `ApiError` the UI can show and offer a retry for.
+ *
+ * The session-restore and sign-in calls get a longer deadline because the API
+ * is hosted on an instance that sleeps when idle and takes ~25s to wake; a
+ * 20s cap there would turn every first visit into a failure.
+ */
+const DEFAULT_TIMEOUT_MS = 20000;
+const COLD_START_TIMEOUT_MS = 45000;
+const COLD_START_PATHS = ['/auth/refresh', '/auth/login', '/auth/me', '/auth/google', '/auth/verify-email'];
+
+function timeoutFor(path) {
+  return COLD_START_PATHS.some((p) => path.startsWith(p)) ? COLD_START_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
+
+/** Runs `fetch` with a deadline, and with any caller-supplied abort signal still honoured. */
+async function fetchWithTimeout(url, options, timeoutMs, externalSignal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), timeoutMs);
+  const onExternalAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 let accessToken = null;
 try {
   accessToken = sessionStorage.getItem('nalanda_access_token') || null;
@@ -87,9 +127,27 @@ export class ApiError extends Error {
     this.code = code;
     this.details = details;
   }
+
+  /** True when retrying the same request could plausibly succeed. */
+  get isRetryable() {
+    return this.code === 'TIMEOUT' || this.code === 'NETWORK_ERROR' || this.code === 'OFFLINE' || this.status >= 500;
+  }
 }
 
-async function rawRequest(path, { method = 'GET', body, skipAuth = false, isRetry = false } = {}) {
+/** Raised when a caller aborted the request itself (component unmounted, newer request started). */
+export class ApiAbortError extends Error {
+  constructor() {
+    super('Request cancelled.');
+    this.name = 'ApiAbortError';
+    this.code = 'CANCELLED';
+  }
+}
+
+export function isAbortError(err) {
+  return err instanceof ApiAbortError || err?.name === 'AbortError' || err?.code === 'CANCELLED';
+}
+
+async function rawRequest(path, { method = 'GET', body, skipAuth = false, isRetry = false, signal } = {}) {
   // A FormData body (file uploads) must NOT be JSON-stringified, and must
   // NOT get an explicit Content-Type - the browser sets one itself
   // (multipart/form-data with the correct boundary) only when it's absent.
@@ -100,12 +158,42 @@ async function rawRequest(path, { method = 'GET', body, skipAuth = false, isRetr
     headers.Authorization = `Bearer ${accessToken}`;
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers,
-    credentials: 'include', // send/receive httpOnly refresh cookie
-    body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new ApiError('You appear to be offline. Check your connection and try again.', {
+      status: 0,
+      code: 'OFFLINE',
+    });
+  }
+
+  let res;
+  try {
+    res = await fetchWithTimeout(
+      `${API_BASE_URL}${path}`,
+      {
+        method,
+        headers,
+        credentials: 'include', // send/receive httpOnly refresh cookie
+        body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+      },
+      timeoutFor(path),
+      signal
+    );
+  } catch (err) {
+    // A caller-initiated abort is not a failure to report - it means the UI
+    // moved on. Distinguished from our own deadline so the two are not
+    // conflated: one is noise, the other is a real, retryable problem.
+    if (signal?.aborted) throw new ApiAbortError();
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new ApiError('The server took too long to respond. Please try again.', {
+        status: 0,
+        code: 'TIMEOUT',
+      });
+    }
+    throw new ApiError('Could not reach the Nalanda Nexus server. Check your connection and try again.', {
+      status: 0,
+      code: 'NETWORK_ERROR',
+    });
+  }
 
   let payload = null;
   try {
@@ -124,7 +212,7 @@ async function rawRequest(path, { method = 'GET', body, skipAuth = false, isRetr
   if (res.status === 401 && !skipAuth && !isRetry && (code === 'TOKEN_EXPIRED' || code === 'INVALID_TOKEN' || code === 'NO_TOKEN')) {
     const refreshed = await refreshAccessToken();
     if (refreshed) {
-      return rawRequest(path, { method, body, skipAuth, isRetry: true });
+      return rawRequest(path, { method, body, skipAuth, isRetry: true, signal });
     }
   }
 
@@ -147,11 +235,15 @@ async function refreshAccessToken() {
     const startedAt = sessionEpoch;
     // A sign-in or sign-out finished while this was in flight: its token stands.
     const superseded = () => startedAt !== sessionEpoch;
-    refreshPromise = fetch(`${API_BASE_URL}/auth/refresh`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-    })
+    refreshPromise = fetchWithTimeout(
+      `${API_BASE_URL}/auth/refresh`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      },
+      COLD_START_TIMEOUT_MS
+    )
       .then(async (res) => {
         if (superseded()) return Boolean(accessToken);
         if (!res.ok) {
@@ -176,10 +268,10 @@ async function refreshAccessToken() {
 }
 
 export const apiClient = {
-  get: (path) => rawRequest(path, { method: 'GET' }),
+  get: (path, opts) => rawRequest(path, { method: 'GET', ...opts }),
   post: (path, body, opts) => rawRequest(path, { method: 'POST', body, ...opts }),
-  patch: (path, body) => rawRequest(path, { method: 'PATCH', body }),
-  put: (path, body) => rawRequest(path, { method: 'PUT', body }),
-  delete: (path) => rawRequest(path, { method: 'DELETE' }),
+  patch: (path, body, opts) => rawRequest(path, { method: 'PATCH', body, ...opts }),
+  put: (path, body, opts) => rawRequest(path, { method: 'PUT', body, ...opts }),
+  delete: (path, opts) => rawRequest(path, { method: 'DELETE', ...opts }),
   tryRefreshSession: refreshAccessToken,
 };

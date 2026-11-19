@@ -2,13 +2,55 @@ import mongoose from 'mongoose';
 
 const { Schema } = mongoose;
 
+/**
+ * A YouTube video attached to one lesson by an administrator or an assigned
+ * teacher (services/lessonVideo.service.js is the only writer).
+ *
+ * Only facts are stored. The embed URL, watch URL and thumbnail URLs are pure
+ * functions of `videoId` (utils/youtube.js) and are computed on every read, so
+ * there is no second copy of the id to fall out of step with the first.
+ *
+ * Absent on every lesson nobody has managed, which is how the many lessons
+ * that predate this field keep behaving exactly as they did.
+ */
+const lessonVideoSchema = new Schema(
+  {
+    provider: { type: String, enum: ['youtube'], default: 'youtube', required: true },
+    videoId: { type: String, required: true, match: /^[A-Za-z0-9_-]{11}$/ },
+    // What the editor pasted, after validation - shown back to them so they
+    // recognise their own link. Never rendered into an iframe.
+    originalUrl: { type: String, required: true, maxlength: 2048 },
+    title: { type: String, default: '', maxlength: 200 },
+    description: { type: String, default: '', maxlength: 2000 },
+    // 'embed' plays inside Nalanda Nexus; 'external' only offers YouTube.
+    playbackMode: { type: String, enum: ['embed', 'external'], default: 'embed' },
+    isPublished: { type: Boolean, default: false },
+    publishedAt: { type: Date, default: null },
+    // What YouTube's oEmbed endpoint said when the link was last saved:
+    // 'restricted' is embedding disabled (or private), 'unavailable' is no
+    // such public video, 'unknown' is that the check could not be made.
+    availability: { type: String, enum: ['available', 'restricted', 'unavailable', 'unknown'], default: 'unknown' },
+    checkedAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
+    updatedBy: {
+      portal: { type: String, enum: ['admin', 'teacher'], default: null },
+      userId: { type: String, default: null },
+      name: { type: String, default: null },
+    },
+  },
+  { _id: false }
+);
+
 const lessonSchema = new Schema(
   {
     lessonId: { type: String, required: true }, // stable slug, e.g. "l-4"
     title: { type: String, required: true },
     duration: { type: String, default: '' },
     order: { type: Number, required: true },
+    // Legacy: a directly-hosted file (e.g. /PRARAMBH.mp4). Superseded by
+    // `video` on any lesson that has one; kept so seeded lessons still play.
     videoUrl: { type: String, default: '' },
+    video: { type: lessonVideoSchema, default: undefined },
     /**
      * What the lesson actually teaches.
      *
@@ -39,6 +81,9 @@ const moduleSchema = new Schema(
     // A module-level default, so tagging a whole unit does not mean editing
     // every lesson in it. An individual lesson still overrides this.
     subject: { type: String, default: null, uppercase: true, trim: true },
+    // The module's introduction video, shown to students as the first item of
+    // the module. Same shape and rules as a lesson's; absent on most modules.
+    video: { type: lessonVideoSchema, default: undefined },
     lessons: [lessonSchema],
   },
   { _id: false }

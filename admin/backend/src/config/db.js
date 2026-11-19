@@ -52,6 +52,28 @@ export async function connectDatabase({ retries = 5, retryDelayMs = 3000 } = {})
       await mongoose.connect(env.mongodbUri, {
         serverSelectionTimeoutMS: 8000,
         autoIndex: env.nodeEnv !== 'production',
+
+        /**
+         * Connection pool. Mongoose's default is maxPoolSize 100, which on a
+         * single small instance means a traffic burst can open far more
+         * connections to Atlas than the tier allows - Atlas then refuses
+         * them, which surfaces in the browser as requests that hang until
+         * their own timeout. 20 is comfortably above this service's real
+         * concurrency and well inside the connection limit.
+         *
+         * minPoolSize keeps a few sockets warm so a request arriving after an
+         * idle period does not pay for a fresh TCP + TLS + auth handshake
+         * before its first query.
+         */
+        maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 20,
+        minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 2,
+
+        /**
+         * A query that cannot be served promptly must fail rather than hold
+         * its HTTP request open indefinitely - an un-timed-out operation is
+         * the server-side half of a frontend stuck on a spinner.
+         */
+        socketTimeoutMS: 45000,
       });
       return mongoose.connection;
     } catch (err) {

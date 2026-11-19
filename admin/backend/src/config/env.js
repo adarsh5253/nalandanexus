@@ -67,12 +67,25 @@ export const env = {
     serviceKey: process.env.TEACHER_BACKEND_SERVICE_KEY || '',
   },
 
+  // Where teachers sign in - the Teacher Portal's FRONTEND. Normally left unset:
+  // the Teacher service reports its own address when an account is provisioned,
+  // which is the address its browser app is actually served from. Set this only
+  // to override that (a custom domain in front of it).
+  teacherPortalUrl: stripTrailingSlash(process.env.TEACHER_PORTAL_URL || ''),
+
+  // How long a teacher's password-setup link works. Long enough that a new
+  // teacher who does not open their email on the day is not locked out, short
+  // enough that a forwarded or leaked link is not a standing credential.
+  teacherSetupLinkTtlHours: Math.min(168, Math.max(1, parseInt(process.env.TEACHER_SETUP_LINK_TTL_HOURS, 10) || 72)),
+
   // Email (optional - if unset, emails are logged to console instead of
   // sent). Sent via SendGrid's HTTPS API (not SMTP) - Render blocks outbound
   // SMTP ports (25/465/587) on free-tier web services, so raw SMTP can never
   // work there regardless of credentials; HTTPS (443) is never blocked.
   email: {
     sendgridApiKey: process.env.SENDGRID_API_KEY || '',
+    // Overridable so tests can stand in for SendGrid; production never sets it.
+    apiUrl: process.env.SENDGRID_API_URL || 'https://api.sendgrid.com/v3/mail/send',
     from: process.env.SMTP_FROM || 'Nalanda Nexus <nalandanexus@gmail.com>',
   },
 };

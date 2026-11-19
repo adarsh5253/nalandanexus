@@ -46,4 +46,16 @@ export const changePassword = catchAsync(async (req, res) => {
   sendSuccess(res, { message: 'Password updated successfully.', data: null });
 });
 
-export default { login, logout, logoutAllSessions, me, changePassword };
+/** Public: what the password-setup page may show for a link, before anything is chosen. */
+export const inspectPasswordSetup = catchAsync(async (req, res) => {
+  const details = await authService.inspectPasswordSetup(req.params.token);
+  sendSuccess(res, { data: details });
+});
+
+/** Public: redeems a single-use link. Does not sign anyone in - the person signs in with the password they just chose. */
+export const completePasswordSetup = catchAsync(async (req, res) => {
+  const { email, teacherId } = await authService.completePasswordSetup({ token: req.body.token, password: req.body.password, ip: req.ip });
+  sendSuccess(res, { message: 'Your password has been set. You can now sign in.', data: { email, teacherId } });
+});
+
+export default { login, logout, logoutAllSessions, me, changePassword, inspectPasswordSetup, completePasswordSetup };

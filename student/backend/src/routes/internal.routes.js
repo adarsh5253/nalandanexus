@@ -1,6 +1,16 @@
 import { Router } from 'express';
 import * as internalController from '../controllers/internal.controller.js';
 import * as eligibilityController from '../controllers/eligibilityAdmin.controller.js';
+import * as lessonVideoController from '../controllers/lessonVideo.controller.js';
+import {
+  videoCatalogSchema,
+  courseVideosSchema,
+  inspectVideoSchema,
+  upsertLessonVideoSchema,
+  removeLessonVideoSchema,
+  upsertModuleVideoSchema,
+  removeModuleVideoSchema,
+} from '../validators/lessonVideo.validators.js';
 import { requireInternalServiceKey } from '../middleware/internalService.js';
 import { validate } from '../middleware/validate.js';
 import {
@@ -17,6 +27,8 @@ import {
   unpublishBridgedCourseSchema,
   upsertBridgedResourceSchema,
   retractBridgedResourceSchema,
+  upsertBridgedFacultySchema,
+  retractBridgedFacultySchema,
   gradeBridgedTaskSubmissionSchema,
   adminListCouponsSchema,
   adminCreateCampaignSchema,
@@ -42,6 +54,16 @@ import {
 // student/teacher/admin session, by design.
 const router = Router();
 router.use(requireInternalServiceKey);
+
+// Lesson videos (YouTube). Lessons live only here, so the Admin and Teacher
+// portals manage their videos through these rather than holding a copy.
+router.get('/lesson-videos/courses', validate(videoCatalogSchema), lessonVideoController.listVideoCatalog);
+router.get('/lesson-videos/courses/:slug', validate(courseVideosSchema), lessonVideoController.getCourseVideos);
+router.post('/lesson-videos/inspect', validate(inspectVideoSchema), lessonVideoController.inspectVideo);
+router.put('/lesson-videos/courses/:slug/lessons/:lessonId', validate(upsertLessonVideoSchema), lessonVideoController.upsertVideo);
+router.delete('/lesson-videos/courses/:slug/lessons/:lessonId', validate(removeLessonVideoSchema), lessonVideoController.removeVideo);
+router.put('/lesson-videos/courses/:slug/modules/:moduleId', validate(upsertModuleVideoSchema), lessonVideoController.upsertVideo);
+router.delete('/lesson-videos/courses/:slug/modules/:moduleId', validate(removeModuleVideoSchema), lessonVideoController.removeVideo);
 
 router.post('/announcements', validate(createBridgedAnnouncementSchema), internalController.createBridgedAnnouncement);
 router.patch('/announcements/:sourceId', validate(updateBridgedAnnouncementSchema), internalController.updateBridgedAnnouncement);
@@ -72,6 +94,11 @@ router.patch('/courses/:sourceId/unpublish', validate(unpublishBridgedCourseSche
 router.post('/resources', validate(upsertBridgedResourceSchema), internalController.upsertBridgedResource);
 router.patch('/resources', validate(upsertBridgedResourceSchema), internalController.upsertBridgedResource);
 router.delete('/resources/:sourceId', validate(retractBridgedResourceSchema), internalController.retractBridgedResource);
+
+// The teaching faculty the About page introduces. The admin portal owns teacher
+// identity; this is where it publishes the part the public may see.
+router.post('/faculty', validate(upsertBridgedFacultySchema), internalController.upsertBridgedFaculty);
+router.delete('/faculty/:sourceId', validate(retractBridgedFacultySchema), internalController.retractBridgedFaculty);
 
 router.patch(
   '/task-submissions/:sourceId/grade',

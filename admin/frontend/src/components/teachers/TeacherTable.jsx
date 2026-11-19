@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import StatusBadge from '../common/StatusBadge';
 import EmptyState from '../common/EmptyState';
+import { EmailStatusBadge } from './OnboardingStatus';
 
 export default function TeacherTable({
   teachers = [],
@@ -139,6 +140,7 @@ export default function TeacherTable({
                   <th className="py-3 px-4">Teacher & ID</th>
                   <th className="py-3 px-4">Official Email</th>
                   <th className="py-3 px-4">Subject & Department</th>
+                  <th className="py-3 px-4">Courses</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 font-mono">Last Active</th>
                   <th className="py-3 px-4 text-right">Actions</th>
@@ -186,9 +188,36 @@ export default function TeacherTable({
                         </p>
                       </td>
 
+                      {/* Assigned courses: what decides which students they see */}
+                      <td className="py-3.5 px-4">
+                        {(teacher.assignedCourses || []).length ? (
+                          <div className="flex flex-wrap gap-1 max-w-[200px]">
+                            {teacher.assignedCourses.map((c) => (
+                              <span
+                                key={c.slug}
+                                title={c.title || c.slug}
+                                className="px-1.5 py-0.5 rounded-md bg-[#22355E]/10 border border-[#22355E]/20 text-[10px] font-bold text-[#22355E] uppercase"
+                              >
+                                {c.title || c.slug}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-[#9B9690]">None assigned</span>
+                        )}
+                        {teacher.courseSyncStatus === 'failed' && (
+                          <p className="text-[10px] text-[#C1352B] mt-1" title={teacher.courseSyncError || ''}>
+                            Not sent to Teacher Portal
+                          </p>
+                        )}
+                      </td>
+
                       {/* Status Column */}
                       <td className="py-3.5 px-4">
-                        <StatusBadge status={teacher.status} size="xs" />
+                        <div className="flex flex-col items-start gap-1">
+                          <StatusBadge status={teacher.status} size="xs" />
+                          <EmailStatusBadge teacher={teacher} />
+                        </div>
                       </td>
 
                       {/* Last Active */}
@@ -268,10 +297,10 @@ export default function TeacherTable({
                                     onResendCredentials(teacher);
                                   }}
                                   className="w-full px-3.5 py-1.5 text-xs text-[#22355E] hover:bg-[#F7F5EE] flex items-center gap-2 font-medium"
-                                  title="Issues a brand-new temporary password and emails it — invalidates the current one"
+                                  title="Emails a new password-setup link. Any earlier link stops working; the teacher's current password is unchanged until they use it."
                                 >
                                   <RotateCcw className="w-3.5 h-3.5" />
-                                  <span>Resend Credentials</span>
+                                  <span>Resend Setup Email</span>
                                 </button>
                               )}
                               <button

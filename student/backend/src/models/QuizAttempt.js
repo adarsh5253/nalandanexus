@@ -29,5 +29,14 @@ const quizAttemptSchema = new Schema(
 
 quizAttemptSchema.index({ userId: 1, quizId: 1, createdAt: -1 });
 quizAttemptSchema.index({ status: 1, expiresAt: 1 });
+// Serves the dashboard's cohort trend, which ranges over `createdAt` with no
+// userId predicate (services/performance.service.js). The compound index above
+// is prefixed by userId and so cannot serve that query - without this one it
+// was a full collection scan on every dashboard load, growing with the whole
+// student body.
+quizAttemptSchema.index({ createdAt: -1 });
+// Serves this student's own slice of the same trend, and any other per-student
+// range query over attempts, without needing to touch quizId.
+quizAttemptSchema.index({ userId: 1, createdAt: -1 });
 
 export const QuizAttempt = mongoose.model('QuizAttempt', quizAttemptSchema);

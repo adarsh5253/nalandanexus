@@ -16,6 +16,51 @@ export function timeAgo(date) {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const RANGE_CONFIG = {
+  '7d': { count: 7, unit: 'day', labels: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] },
+  '30d': { count: 4, unit: 'week', labelPrefix: 'Week' },
+  '3m': { count: 3, unit: 'month', labelPrefix: 'Month' },
+  '1y': { count: 4, unit: 'quarter', labelPrefix: 'Q' },
+};
+
+const DEFAULT_CONFIG = RANGE_CONFIG['7d'];
+
+/**
+ * The bucket boundaries and labels for a range, with no counting.
+ *
+ * Split out of `bucketByRange` so the same windows can be handed to MongoDB
+ * as an aggregation's `$bucket` boundaries instead of being applied to
+ * documents loaded into this process - see
+ * services/dashboard.service.js#computeLearningActivity. One definition, used
+ * by both paths, so the chart cannot drift between them.
+ *
+ * The windows are contiguous and non-overlapping (each bucket's `start` is the
+ * previous bucket's `end`), which is what makes them valid `$bucket`
+ * boundaries.
+ */
+export function rangeBuckets(range, now = new Date()) {
+  const config = RANGE_CONFIG[range] || DEFAULT_CONFIG;
+  const stepMs =
+    config.unit === 'day' ? DAY_MS : config.unit === 'week' ? 7 * DAY_MS : config.unit === 'month' ? 30 * DAY_MS : 91 * DAY_MS;
+
+  const buckets = [];
+  for (let i = config.count - 1; i >= 0; i -= 1) {
+    const end = new Date(now.getTime() - i * stepMs);
+    const start = new Date(end.getTime() - stepMs);
+    const label =
+      config.unit === 'day'
+        ? config.labels[end.getDay()]
+        : config.unit === 'quarter'
+        ? `${config.labelPrefix}${config.count - i}`
+        : `${config.labelPrefix} ${config.count - i}`;
+    buckets.push({ start, end, name: label });
+  }
+  return buckets;
+}
+
+/** Every range this module knows how to bucket. */
+export const BUCKET_RANGES = Object.keys(RANGE_CONFIG);
+
 /**
  * Builds N contiguous day/week/month/quarter buckets ending "now" and counts
  * how many `docs` (each needing a `.createdAt`/`.timestamp` Date field) fall
@@ -23,39 +68,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * with a count of 0 — never omitted — so charts render a real flat line
  * instead of a gap, satisfying the "no undefined/NaN in charts" requirement.
  */
-export function bucketByRange(docs, range) {
-  const now = new Date();
-  const config = {
-    '7d': { count: 7, unit: 'day', labels: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] },
-    '30d': { count: 4, unit: 'week', labelPrefix: 'Week' },
-    '3m': { count: 3, unit: 'month', labelPrefix: 'Month' },
-    '1y': { count: 4, unit: 'quarter', labelPrefix: 'Q' },
-  }[range] || { count: 7, unit: 'day', labels: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] };
-
-  const buckets = [];
-  for (let i = config.count - 1; i >= 0; i -= 1) {
-    let start;
-    let end;
-    let label;
-    if (config.unit === 'day') {
-      end = new Date(now.getTime() - i * DAY_MS);
-      start = new Date(end.getTime() - DAY_MS);
-      label = config.labels[end.getDay()];
-    } else if (config.unit === 'week') {
-      end = new Date(now.getTime() - i * 7 * DAY_MS);
-      start = new Date(end.getTime() - 7 * DAY_MS);
-      label = `${config.labelPrefix} ${config.count - i}`;
-    } else if (config.unit === 'month') {
-      end = new Date(now.getTime() - i * 30 * DAY_MS);
-      start = new Date(end.getTime() - 30 * DAY_MS);
-      label = `${config.labelPrefix} ${config.count - i}`;
-    } else {
-      end = new Date(now.getTime() - i * 91 * DAY_MS);
-      start = new Date(end.getTime() - 91 * DAY_MS);
-      label = `${config.labelPrefix}${config.count - i}`;
-    }
-    buckets.push({ start, end, name: label, activeSessions: 0, submissions: 0 });
-  }
+export function bucketByRange(docs, range, now = new Date()) {
+  const buckets = rangeBuckets(range, now).map((b) => ({ ...b, activeSessions: 0, submissions: 0 }));
 
   for (const doc of docs) {
     const ts = new Date(doc.createdAt).getTime();
@@ -68,4 +82,4 @@ export function bucketByRange(docs, range) {
   return buckets.map(({ start, end, ...rest }) => rest);
 }
 
-export default { timeAgo, bucketByRange };
+export default { timeAgo, bucketByRange, rangeBuckets, BUCKET_RANGES };

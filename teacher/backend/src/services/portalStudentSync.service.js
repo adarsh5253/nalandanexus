@@ -1,5 +1,6 @@
 import { Student } from '../models/Student.js';
 import { emitToTeacher } from '../sockets/index.js';
+import { applyPortalRecordToRoster } from './courseRoster.service.js';
 
 /**
  * Applies a student's record from the student portal to the rosters here.
@@ -126,6 +127,12 @@ export async function applyPortalStudent(record) {
   // Each teacher hears only about rows on their own roster, so an open Students
   // or Classes page refreshes without anybody reloading it.
   for (const [teacherId, students] of changedByTeacher) emitToTeacher(teacherId, 'student.synced', { students });
+
+  // The course-wide roster a teacher assigned the course can see. Separate from
+  // the batch rows above: it needs no placement, so a student appears the moment
+  // they enrol. A failure here fails the record, so the student portal marks it
+  // pending and sends it again - the roster is never silently left behind.
+  outcome.roster = await applyPortalRecordToRoster(record);
 
   return outcome;
 }

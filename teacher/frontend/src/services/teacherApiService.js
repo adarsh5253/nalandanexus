@@ -22,6 +22,62 @@ export class ApiClientError extends Error {
     this.code = code || 'UNKNOWN_ERROR';
     this.details = details;
   }
+
+  /** True when retrying the same request could plausibly succeed. */
+  get isRetryable() {
+    return this.code === 'TIMEOUT' || this.code === 'NETWORK_ERROR' || this.code === 'OFFLINE' || this.status >= 500;
+  }
+}
+
+/** Raised when a caller aborted the request itself (component unmounted, newer request started). */
+export class ApiAbortError extends Error {
+  constructor() {
+    super('Request cancelled.');
+    this.name = 'ApiAbortError';
+    this.code = 'CANCELLED';
+  }
+}
+
+export function isAbortError(err) {
+  return err instanceof ApiAbortError || err?.name === 'AbortError' || err?.code === 'CANCELLED';
+}
+
+/**
+ * Every request carries a deadline.
+ *
+ * `fetch` has no timeout of its own, so a request to a backend that accepts
+ * the connection and then never answers never settles - no `catch`, no
+ * `finally`, and a page left spinning until the tab is closed. An
+ * AbortController bounds every request, and an expired deadline arrives as an
+ * ordinary `ApiClientError` with a retryable code.
+ *
+ * The session and sign-in calls get longer, because the API is hosted on an
+ * instance that sleeps when idle and takes ~25s to answer the first request.
+ */
+const DEFAULT_TIMEOUT_MS = 20000;
+const COLD_START_TIMEOUT_MS = 45000;
+// Lesson-video calls are proxied to the student service, which sleeps when
+// idle too, so they get the same budget as a cold sign-in.
+const COLD_START_PATHS = ['/auth/me', '/auth/login', '/lesson-videos'];
+
+function timeoutFor(path) {
+  return COLD_START_PATHS.some((p) => path.startsWith(p)) ? COLD_START_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs, externalSignal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), timeoutMs);
+  const onExternalAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
 }
 
 /**
@@ -34,7 +90,7 @@ export function onSessionExpired(handler) {
   sessionExpiredHandler = handler;
 }
 
-async function request(path, { method = 'GET', body, query, isFormData = false } = {}) {
+async function request(path, { method = 'GET', body, query, isFormData = false, signal } = {}) {
   let url = `${API_BASE_URL}${path}`;
   if (query && Object.keys(query).length) {
     const params = new URLSearchParams();
@@ -46,15 +102,35 @@ async function request(path, { method = 'GET', body, query, isFormData = false }
     if (qs) url += `?${qs}`;
   }
 
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new ApiClientError('You appear to be offline. Check your connection and try again.', {
+      status: 0,
+      code: 'OFFLINE',
+    });
+  }
+
   let res;
   try {
-    res = await fetch(url, {
-      method,
-      credentials: 'include', // send/receive the httpOnly session cookie
-      headers: isFormData ? undefined : body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-      body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
-    });
+    res = await fetchWithTimeout(
+      url,
+      {
+        method,
+        credentials: 'include', // send/receive the httpOnly session cookie
+        headers: isFormData ? undefined : body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+        body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
+      },
+      timeoutFor(path),
+      signal
+    );
   } catch (networkErr) {
+    // A caller-initiated abort means the UI moved on, not that anything failed.
+    if (signal?.aborted) throw new ApiAbortError();
+    if (networkErr?.name === 'TimeoutError' || networkErr?.name === 'AbortError') {
+      throw new ApiClientError('The server took too long to respond. Please try again.', {
+        status: 0,
+        code: 'TIMEOUT',
+      });
+    }
     throw new ApiClientError(
       'Could not reach the Nalanda Teacher server. Check your connection and that the backend is running.',
       { status: 0, code: 'NETWORK_ERROR' }
@@ -80,11 +156,18 @@ async function request(path, { method = 'GET', body, query, isFormData = false }
   return json; // { success, message, data, meta? }
 }
 
-const get = (path, query) => request(path, { method: 'GET', query });
-const post = (path, body) => request(path, { method: 'POST', body: body ?? {} });
+const get = (path, query, signal) => request(path, { method: 'GET', query, signal });
+const post = (path, body, signal) => request(path, { method: 'POST', body: body ?? {}, signal });
 const patch = (path, body) => request(path, { method: 'PATCH', body: body ?? {} });
+const put = (path, body) => request(path, { method: 'PUT', body: body ?? {} });
 const del = (path) => request(path, { method: 'DELETE' });
 const postForm = (path, formData) => request(path, { method: 'POST', body: formData, isFormData: true });
+
+// A course video belongs to one lesson or one module.
+function courseVideoPath(slug, target) {
+  const node = target.moduleId ? `modules/${encodeURIComponent(target.moduleId)}` : `lessons/${encodeURIComponent(target.lessonId)}`;
+  return `/lesson-videos/courses/${encodeURIComponent(slug)}/${node}`;
+}
 
 class TeacherApiService {
   // ---- Auth ----
@@ -102,6 +185,14 @@ class TeacherApiService {
   }
   changePassword(currentPassword, newPassword) {
     return post('/auth/change-password', { currentPassword, newPassword }).then((r) => r.data);
+  }
+  /** Public: who an emailed password-setup link is for. Rejects with SETUP_LINK_INVALID for any bad link. */
+  inspectPasswordSetup(token) {
+    return get(`/auth/setup-password/${encodeURIComponent(token)}`).then((r) => r.data);
+  }
+  /** Public: redeems a single-use link and sets the password. Does not sign anyone in. */
+  completePasswordSetup(token, password) {
+    return post('/auth/setup-password', { token, password }).then((r) => r.data);
   }
 
   // ---- Profile ----
@@ -121,8 +212,9 @@ class TeacherApiService {
   }
 
   // ---- Dashboard ----
-  getDashboardOverview() {
-    return get('/dashboard/overview').then((r) => r.data);
+  /** `signal` lets the caller cancel this on unmount - it is the portal's most expensive query. */
+  getDashboardOverview(signal) {
+    return get('/dashboard/overview', undefined, signal).then((r) => r.data);
   }
 
   // ---- Classes ----
@@ -306,6 +398,19 @@ class TeacherApiService {
   getAssignedCourses() {
     return get('/courses/assigned').then((r) => r.data);
   }
+  /**
+   * The students enrolled in one course the teacher has been assigned.
+   * Returns the whole envelope ({ data: { course, students }, meta }) so the page
+   * can page through it. A course that was not assigned answers 404, exactly as
+   * one that does not exist.
+   */
+  getAssignedCourseStudents(slug, params = {}) {
+    return get(`/courses/assigned/${encodeURIComponent(slug)}/students`, params);
+  }
+  /** Recovery only: the roster keeps itself current. Re-reads one assigned course from the student portal. */
+  refreshAssignedCourseStudents(slug) {
+    return post(`/courses/assigned/${encodeURIComponent(slug)}/refresh`).then((r) => r.data);
+  }
   createCourse(payload) {
     return post('/courses', payload).then((r) => r.data);
   }
@@ -314,6 +419,24 @@ class TeacherApiService {
   }
   archiveCourse(courseId) {
     return del(`/courses/${courseId}`).then((r) => r.data);
+  }
+
+  // ---- Lesson videos (assigned courses only; enforced by the backend) ----
+  getLessonVideoCourses() {
+    return get('/lesson-videos/courses').then((r) => r.data || []);
+  }
+  getLessonVideos(slug) {
+    return get(`/lesson-videos/courses/${encodeURIComponent(slug)}`).then((r) => r.data);
+  }
+  inspectLessonVideo(url, { signal } = {}) {
+    return post('/lesson-videos/inspect', { url }, signal).then((r) => r.data);
+  }
+  // target is { lessonId } or { moduleId }.
+  saveCourseVideo(slug, target, payload) {
+    return put(courseVideoPath(slug, target), payload).then((r) => r.data);
+  }
+  removeCourseVideo(slug, target, payload = {}) {
+    return request(courseVideoPath(slug, target), { method: 'DELETE', body: payload }).then((r) => r.data);
   }
 
   // ---- Exams ----

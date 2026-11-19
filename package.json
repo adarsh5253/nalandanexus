@@ -10,6 +10,7 @@
     "dev:teacher:backend": "cd teacher/backend && npm run dev",
     "dev:admin:frontend": "cd admin/frontend && npm run dev",
     "dev:admin:backend": "cd admin/backend && npm run dev",
-    "build:student": "cd student/frontend && npm run build"
+    "build:student": "cd student/frontend && npm run build",
+    "test:e2e:lesson-videos": "node e2e/lessonVideo.e2e.mjs"
   }
 }

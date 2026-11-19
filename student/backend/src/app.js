@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
@@ -33,6 +34,21 @@ export function createApp() {
 
   // Security headers
   app.use(helmet());
+
+  // gzip every response above compression's own 1KB threshold.
+  //
+  // The teacher and admin services have always had this; this one did not,
+  // and it serves the largest JSON in the platform - the consolidated
+  // /api/student/dashboard payload carries a profile, a course with its
+  // modules, notifications, due tasks, a leaderboard and a 7-day trend in one
+  // body. Those are highly repetitive JSON, which gzip compresses by roughly
+  // 5-8x, so this is the single biggest reduction in bytes-on-the-wire
+  // available for the slow connections the portal actually has to work on.
+  //
+  // Placed before the routes and before the /uploads handler. Image and PDF
+  // bytes are already compressed, and compression's default filter skips them
+  // by content type, so nothing is wastefully re-compressed.
+  app.use(compression());
 
   // CORS - only the configured client origin(s), with credentials for httpOnly cookies.
   // CLIENT_URL may be a comma-separated list (see config/env.js) to support

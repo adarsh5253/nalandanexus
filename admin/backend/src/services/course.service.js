@@ -78,6 +78,9 @@ async function syncToAssignedTeacher(course) {
     image: course.image ? `${env.serverUrl}${course.image}` : null,
     priceInPaise: course.priceInPaise,
     status: course.status,
+    // Lets the instructor see the students enrolled in a course sold under this
+    // slug, the same as one assigned to them from the teacher's own profile.
+    studentCourseSlug: course.slug || undefined,
   });
 }
 

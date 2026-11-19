@@ -8,6 +8,13 @@ import DeleteModal from '../components/common/DeleteModal';
 import { adminApi } from '../services/adminApi';
 import { useRealtimeEvents } from '../hooks/useRealtimeEvents';
 
+const RESEND_WARNING_COPY = {
+  PORTAL_PROVISIONING_FAILED: 'The Teacher Portal could not be reached, so no new link was issued and no email was sent. Nothing was changed — try again in a moment.',
+  EMAIL_DELIVERY_FAILED: 'The link was issued, but the email provider did not accept the message.',
+  COURSE_SYNC_FAILED: 'The Teacher Portal did not accept the course assignment yet.',
+  TEACHER_ID_MISMATCH: 'The Teacher Portal could not use the Teacher ID shown here; check the ID in the email.',
+};
+
 export default function TeachersPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialFilter = searchParams.get('filter');
@@ -34,10 +41,12 @@ export default function TeachersPage() {
 
   // Toast / Action notification
   const [toastMsg, setToastMsg] = useState(null);
-  // Only populated when a resend could not be emailed — shown in a
-  // dedicated, non-auto-dismissing modal (a 4s toast is the wrong place
-  // for a one-time-visible credential).
-  const [credentialResult, setCredentialResult] = useState(null);
+  // Only populated when a resend did not fully work - shown in a dedicated,
+  // non-auto-dismissing modal, because a 4s toast is the wrong place for the
+  // reason an email did not go out.
+  const [resendProblem, setResendProblem] = useState(null);
+  // Which teacher a resend is in flight for, so its button can show it.
+  const [resendingId, setResendingId] = useState(null);
 
   const showToast = (msg, type = 'success') => {
     setToastMsg({ msg, type });
@@ -98,18 +107,46 @@ export default function TeachersPage() {
     }
   };
 
+  /**
+   * Sends the teacher a new password-setup link. No password is involved: the
+   * link replaces any earlier one, and the teacher chooses their own. If it
+   * could not be sent, the recorded reason is shown rather than a vague error.
+   */
   const handleResendCredentials = async (teacher) => {
+    setResendingId(teacher.id);
     try {
       const res = await adminApi.resendCredentials(teacher.id);
       const warnings = res.meta?.warnings || [];
-      if (res.data?.tempPasswordFallback) {
-        setCredentialResult({ email: teacher.email, tempPassword: res.data.tempPasswordFallback, warnings });
+      if (warnings.length) {
+        setResendProblem({ name: teacher.name, email: teacher.email, warnings, reason: res.data?.emailDeliveryError || null });
       } else {
-        showToast(`New credentials generated and emailed to ${teacher.email}.`);
+        showToast(`A new password-setup email was sent to ${teacher.email}.`);
       }
+      if (selectedTeacher?.id === teacher.id && res.data) setSelectedTeacher({ ...selectedTeacher, ...res.data, id: teacher.id });
       fetchTeachers();
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      setResendingId(null);
+    }
+  };
+
+  /** Replaces the teacher's assigned courses; the Teacher Portal's student list follows. */
+  const handleSetCourses = async (teacher, courseSlugs) => {
+    try {
+      const res = await adminApi.setTeacherCourses(teacher.id, courseSlugs);
+      const warnings = res.meta?.warnings || [];
+      if (warnings.length) {
+        showToast('Courses saved, but the Teacher Portal has not accepted them yet — retry from the profile.', 'error');
+      } else {
+        showToast(`Courses updated for ${teacher.name}. Their enrolled students are now visible to the teacher.`);
+      }
+      if (res.data) setSelectedTeacher((current) => (current?.id === teacher.id ? { ...current, ...res.data, id: teacher.id } : current));
+      fetchTeachers();
+      return res;
+    } catch (err) {
+      showToast(err.message, 'error');
+      throw err;
     }
   };
 
@@ -136,6 +173,26 @@ export default function TeachersPage() {
     }
   };
 
+  /**
+   * Saves what the public About page shows for this teacher. The backend
+   * publishes it to the student portal, or withdraws it when it is switched
+   * off - see admin/backend/src/services/studentFacultyBridge.service.js.
+   */
+  const handleUpdateWebsiteProfile = async (teacher, profile) => {
+    try {
+      const updated = await adminApi.updateTeacher(teacher.id, profile);
+      showToast(
+        profile.showOnWebsite
+          ? `${teacher.name} now appears on the student website.`
+          : `${teacher.name} was removed from the student website.`
+      );
+      fetchTeachers();
+      if (selectedTeacher?.id === teacher.id) setSelectedTeacher({ ...selectedTeacher, ...(updated || profile) });
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+
   const handleReactivate = async (teacher) => {
     try {
       await adminApi.reactivateTeacher(teacher.id);
@@ -149,14 +206,9 @@ export default function TeachersPage() {
     }
   };
 
-  const handleResetPassword = async (teacher) => {
-    try {
-      const res = await adminApi.resetPassword(teacher.id);
-      showToast(`Password reset authorization issued for ${teacher.email}`);
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  };
+  // A password can only be set through an emailed single-use link, so a reset is
+  // the same thing as sending a new one.
+  const handleResetPassword = (teacher) => handleResendCredentials(teacher);
 
   const handleDeletePrompt = (teacher) => {
     setTeacherToDelete(teacher);
@@ -264,7 +316,7 @@ export default function TeachersPage() {
           showToast(
             warnings.length
               ? 'Teacher created — see the dialog for items needing attention.'
-              : 'Teacher created and Teacher Portal access provisioned!'
+              : 'Teacher created. A password-setup email has been sent.'
           );
           fetchTeachers();
         }}
@@ -279,6 +331,9 @@ export default function TeachersPage() {
         onResetPassword={handleResetPassword}
         onResendInvite={handleResendInvite}
         onResendCredentials={handleResendCredentials}
+        onUpdateWebsiteProfile={handleUpdateWebsiteProfile}
+        onSetCourses={handleSetCourses}
+        isResending={resendingId === selectedTeacher?.id}
       />
 
       <DeleteModal
@@ -291,13 +346,14 @@ export default function TeachersPage() {
         isDeleting={isDeleting}
       />
 
-      {/* Fallback credential display — only shown when the resend email itself failed to send */}
-      {credentialResult && (
+      {/* Shown when a resend did not fully work. It states why, and never contains a password: there is none to show. */}
+      {resendProblem && (
         <div className="fixed inset-0 z-50 bg-[#22355E]/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white border border-[#DFDACB] rounded-2xl max-w-md w-full p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
+          <div role="dialog" aria-modal="true" className="bg-white border border-[#DFDACB] rounded-2xl max-w-md w-full p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
             <button
               type="button"
-              onClick={() => setCredentialResult(null)}
+              aria-label="Close"
+              onClick={() => setResendProblem(null)}
               className="absolute right-4 top-4 p-1.5 rounded-lg text-[#9B9690] hover:text-[#2B2B28] hover:bg-[#EDEAE0] transition-colors"
             >
               <X className="w-4 h-4" />
@@ -305,23 +361,20 @@ export default function TeachersPage() {
             <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-sm border bg-[#C99A2E]/15 border-[#C99A2E]/30 text-[#C99A2E]">
               <ShieldAlert className="w-6 h-6" />
             </div>
-            <h3 className="text-lg font-bold text-[#22355E]">New Credentials Generated — Email Not Delivered</h3>
+            <h3 className="text-lg font-bold text-[#22355E]">Setup Email Needs Attention</h3>
             <p className="text-xs text-[#2B2B28] mt-1.5 leading-relaxed">
-              A new temporary password was issued for{' '}
-              <strong className="font-semibold text-[#22355E]">{credentialResult.email}</strong>, but the credential
-              email could not be delivered. Share this password with the teacher securely — it will not be shown
-              again.
+              The new setup link for <strong className="font-semibold text-[#22355E]">{resendProblem.email}</strong> could not be fully sent.
             </p>
-            <div className="mt-4 p-3 rounded-xl bg-[#F7F5EE] border border-[#DFDACB] space-y-1">
-              <span className="text-[11px] text-[#9B9690] font-semibold">Temporary password</span>
-              <div className="font-mono text-sm font-bold text-[#22355E]">{credentialResult.tempPassword}</div>
-            </div>
+            <ul className="mt-3 space-y-1.5">
+              {resendProblem.warnings.map((code) => (
+                <li key={code} className="text-xs text-[#8a6512] leading-relaxed">
+                  ⚠ {RESEND_WARNING_COPY[code] || code}
+                </li>
+              ))}
+            </ul>
+            {resendProblem.reason && <p className="mt-2 text-xs text-[#C1352B] break-words">Reason: {resendProblem.reason}</p>}
             <div className="pt-4 mt-4 border-t border-[#EDEAE0] flex justify-end">
-              <button
-                type="button"
-                onClick={() => setCredentialResult(null)}
-                className="px-4 py-2 rounded-xl bg-[#22355E] hover:bg-[#1A2A4A] text-white text-xs font-semibold"
-              >
+              <button type="button" onClick={() => setResendProblem(null)} className="px-4 py-2 rounded-xl bg-[#22355E] hover:bg-[#1A2A4A] text-white text-xs font-semibold">
                 Done
               </button>
             </div>

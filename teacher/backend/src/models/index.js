@@ -17,3 +17,5 @@ export { AuditLog } from './AuditLog.js';
 export { Announcement } from './Announcement.js';
 export { AssignedCourse } from './AssignedCourse.js';
 export { AdminAnnouncement } from './AdminAnnouncement.js';
+export { CourseAccess } from './CourseAccess.js';
+export { CourseEnrollment } from './CourseEnrollment.js';

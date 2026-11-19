@@ -102,15 +102,25 @@ async function call(path, options) {
   throw last;
 }
 
-/** Creates the real teacher/backend login. Returns a real status — never throws, never silently succeeds. */
-export async function provisionTeacherAccount({ name, email, phone, tempPassword, title, department, subject }) {
+/**
+ * Creates the real teacher/backend login. Returns a real status — never throws,
+ * never silently succeeds.
+ *
+ * No password is sent. What crosses is the SHA-256 of a setup-link token and
+ * when it expires: the Teacher Portal creates the account with a random
+ * password nobody knows, and the person sets their own through the link. On
+ * success the answer carries the Teacher ID that was actually issued (the one
+ * asked for, unless it was taken) and the address of the Teacher Portal's login
+ * page, so the email links to somewhere real.
+ */
+export async function provisionTeacherAccount({ name, email, phone, title, department, subject, teacherId, avatarUrl, setupTokenHash, setupTokenExpiresAt }) {
   if (!isConfigured()) return { provisioned: false, reason: 'NOT_CONFIGURED' };
   try {
-    await call('/api/internal/teachers', {
+    const result = await call('/api/internal/teachers', {
       method: 'POST',
-      body: JSON.stringify({ name, email, phone, tempPassword, title, department, subject }),
+      body: JSON.stringify({ name, email, phone, title, department, subject, teacherId, avatarUrl, setupTokenHash, setupTokenExpiresAt }),
     });
-    return { provisioned: true };
+    return { provisioned: true, teacherCode: result?.data?.teacherCode || null, portalUrl: result?.data?.portalUrl || null };
   } catch (err) {
     console.error('[teacherBridge] Failed to provision Teacher Portal account:', err.message);
     return { provisioned: false, reason: 'REQUEST_FAILED', error: err.message };
@@ -118,21 +128,43 @@ export async function provisionTeacherAccount({ name, email, phone, tempPassword
 }
 
 /**
- * "Resend Credentials" backend leg — resets the REAL Teacher Portal
- * password to a new admin-issued temporary one. Same honesty contract as
- * provisionTeacherAccount: a real status is always returned, never assumed.
+ * Replaces a teacher's pending password-setup link on the Teacher Portal - the
+ * backend leg of "resend". The old link stops working; the password and any
+ * sessions are untouched until the new link is actually used. Same honesty
+ * contract as provisioning: a real status is always returned.
  */
-export async function resetTeacherCredentials({ email, newPassword }) {
-  if (!isConfigured()) return { reset: false, reason: 'NOT_CONFIGURED' };
+export async function issueTeacherSetupLink({ email, setupTokenHash, setupTokenExpiresAt }) {
+  if (!isConfigured()) return { issued: false, reason: 'NOT_CONFIGURED' };
   try {
-    await call('/api/internal/teachers/credentials', {
+    const result = await call('/api/internal/teachers/credentials', {
       method: 'PATCH',
-      body: JSON.stringify({ email, newPassword }),
+      body: JSON.stringify({ email, setupTokenHash, setupTokenExpiresAt }),
     });
-    return { reset: true };
+    return { issued: true, teacherCode: result?.data?.teacherCode || null, portalUrl: result?.data?.portalUrl || null };
   } catch (err) {
-    console.error('[teacherBridge] Failed to reset Teacher Portal credentials:', err.message);
-    return { reset: false, reason: 'REQUEST_FAILED', error: err.message };
+    console.error('[teacherBridge] Failed to issue Teacher Portal setup link:', err.message);
+    return { issued: false, reason: 'REQUEST_FAILED', error: err.message, status: err.status };
+  }
+}
+
+/**
+ * Tells the Teacher Portal the full set of courses this teacher is assigned.
+ * Visibility of each course's students follows from it, so a failure here is
+ * surfaced rather than swallowed: the teacher would simply see no students.
+ * Sent as a set every time, so a retry is always safe.
+ */
+export async function setTeacherCoursesOnPortal({ email, courses }) {
+  if (!isConfigured()) return { applied: false, reason: 'NOT_CONFIGURED' };
+  try {
+    const result = await call('/api/internal/teachers/courses', {
+      method: 'PUT',
+      body: JSON.stringify({ teacherEmail: email, courses }),
+    });
+    if (result?.data?.updated === false) return { applied: false, reason: result.data.reason || 'NOT_APPLIED' };
+    return { applied: true };
+  } catch (err) {
+    console.error('[teacherBridge] Failed to set Teacher Portal courses:', err.message);
+    return { applied: false, reason: 'REQUEST_FAILED', error: err.message };
   }
 }
 
@@ -143,12 +175,14 @@ export async function resetTeacherCredentials({ email, newPassword }) {
  * `sourceId` is admin's own Course _id (string), resolved on the teacher
  * side by email since the two services share no ObjectId space.
  */
-export async function pushCourseAssignment({ sourceId, teacherEmail, title, courseCode, description, image, priceInPaise, status }) {
+export async function pushCourseAssignment({ sourceId, teacherEmail, title, courseCode, description, image, priceInPaise, status, studentCourseSlug }) {
   if (!isConfigured()) return { assigned: false, reason: 'NOT_CONFIGURED' };
   try {
     const result = await call(`/api/internal/courses/${encodeURIComponent(sourceId)}`, {
       method: 'PUT',
-      body: JSON.stringify({ teacherEmail, title, courseCode, description, image, priceInPaise, status }),
+      // The slug is what lets the Teacher Portal show the instructor the students
+      // enrolled in a course sold under it.
+      body: JSON.stringify({ teacherEmail, title, courseCode, description, image, priceInPaise, status, studentCourseSlug: studentCourseSlug || undefined }),
     });
     return { assigned: Boolean(result?.data?.assigned), reason: result?.data?.reason };
   } catch (err) {
@@ -288,7 +322,8 @@ export default {
   reassignBatchTeacher,
   listBatchStudents,
   provisionTeacherAccount,
-  resetTeacherCredentials,
+  issueTeacherSetupLink,
+  setTeacherCoursesOnPortal,
   setTeacherAccountStatus,
   pushCourseAssignment,
   removeCourseAssignment,

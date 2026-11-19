@@ -11,6 +11,7 @@ import dashboardRoutes from './dashboard.routes.js';
 import analyticsRoutes from './analytics.routes.js';
 import notificationRoutes from './notification.routes.js';
 import courseRoutes from './course.routes.js';
+import lessonVideoRoutes from './lessonVideo.routes.js';
 import examRoutes from './exam.routes.js';
 import resourceRoutes from './resource.routes.js';
 import messageRoutes from './message.routes.js';
@@ -50,6 +51,8 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/courses', courseRoutes);
+// YouTube videos on the lessons of a teacher's assigned courses.
+router.use('/lesson-videos', lessonVideoRoutes);
 router.use('/exams', examRoutes);
 router.use('/resources', resourceRoutes);
 router.use('/messages', messageRoutes);

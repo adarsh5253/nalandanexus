@@ -6,6 +6,7 @@ import { Enrollment } from '../models/Enrollment.js';
 import { LessonProgress } from '../models/LessonProgress.js';
 import { recordActivity } from '../services/progression/engine.service.js';
 import { resolveLessonSubject } from '../services/progression/subject.service.js';
+import { shapeLessonVideoForStudent, shapeModuleVideoForStudent } from '../services/lessonVideo.service.js';
 
 /**
  * GET /api/student/courses - courses the authenticated student is enrolled in,
@@ -66,6 +67,9 @@ export const getEnrolledCourseContent = asyncHandler(async (req, res) => {
       moduleId: m.moduleId,
       title: m.title,
       order: m.order,
+      // The module's published introduction video, or null. Not a lesson: it
+      // carries no completion and awards nothing.
+      video: shapeModuleVideoForStudent(m),
       lessons: m.lessons
         .sort((a, b) => a.order - b.order)
         .map((l) => ({
@@ -73,7 +77,9 @@ export const getEnrolledCourseContent = asyncHandler(async (req, res) => {
           title: l.title,
           duration: l.duration,
           order: l.order,
-          videoUrl: l.videoUrl,
+          // `video` is a published YouTube video (or null); `videoUrl` is the
+          // legacy directly-hosted file. A draft video is never sent.
+          ...shapeLessonVideoForStudent(l),
           // The teaching material. A lesson used to be a title, a duration and
           // a video URL, so a course with no video was a list of headings -
           // which is exactly what GARUD and YODDHA would have been.
@@ -130,18 +136,23 @@ export const markLessonComplete = asyncHandler(async (req, res) => {
   const existing = await LessonProgress.findOne({ userId: req.user._id, lessonId });
   const alreadyCompleted = existing?.completed;
 
-  await LessonProgress.findOneAndUpdate(
-    { userId: req.user._id, lessonId },
-    {
-      userId: req.user._id,
-      courseId: course._id,
-      moduleId: targetModule.moduleId,
-      lessonId,
-      completed: true,
-      completedAt: new Date(),
-    },
-    { upsert: true, new: true }
-  );
+  // Written only the first time. Marking a completed lesson again used to
+  // overwrite completedAt with "now", so a student's record of when they
+  // finished a lesson moved every time the request was repeated.
+  if (!alreadyCompleted) {
+    await LessonProgress.findOneAndUpdate(
+      { userId: req.user._id, lessonId },
+      {
+        userId: req.user._id,
+        courseId: course._id,
+        moduleId: targetModule.moduleId,
+        lessonId,
+        completed: true,
+        completedAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
+  }
 
   // Routed through the progression engine rather than awarding XP directly:
   // the engine owns the XP rule, the duplicate check and every derived score.

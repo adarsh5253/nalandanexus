@@ -180,6 +180,30 @@ export const retractBridgedResourceSchema = z.object({
   }),
 });
 
+/**
+ * A teacher's public profile, published by the admin portal. Every field is one
+ * a visitor may read; there is deliberately nowhere here to put an email
+ * address, a phone number or an account status.
+ */
+export const upsertBridgedFacultySchema = z.object({
+  body: z.object({
+    sourceId: z.string().trim().min(1).max(64),
+    name: z.string().trim().min(1).max(120),
+    role: z.string().trim().max(160).optional().nullable(),
+    category: z.string().trim().max(80).optional().nullable(),
+    expertise: z.array(z.string().trim().min(1).max(160)).max(12).optional().default([]),
+    experience: z.string().trim().max(240).optional().nullable(),
+    avatar: z.string().trim().max(2000).optional().nullable(),
+    order: z.coerce.number().int().min(0).max(9999).optional().default(0),
+  }),
+});
+
+export const retractBridgedFacultySchema = z.object({
+  params: z.object({
+    sourceId: z.string().trim().min(1).max(64),
+  }),
+});
+
 export const gradeBridgedTaskSubmissionSchema = z.object({
   params: z.object({
     sourceId: z.string().trim().min(1),
@@ -378,6 +402,8 @@ export default {
   unpublishBridgedCourseSchema,
   upsertBridgedResourceSchema,
   retractBridgedResourceSchema,
+  upsertBridgedFacultySchema,
+  retractBridgedFacultySchema,
   gradeBridgedTaskSubmissionSchema,
 };
 

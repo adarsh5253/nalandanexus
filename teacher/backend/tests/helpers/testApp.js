@@ -86,6 +86,8 @@ async function startFakeStudentPortal() {
     lookupIgnoresScope: false,
     lookups: [],
     calls: [],
+    videoCalls: [],
+    videoReject: null,
   };
 
   const server = http.createServer((req, res) => {
@@ -187,6 +189,49 @@ async function startFakeStudentPortal() {
       });
     }
 
+    // Lesson videos: records what crossed (with the acting teacher) and answers
+    // like the real student service, including its own refusals.
+    if (url.pathname.startsWith('/api/internal/lesson-videos/')) {
+      if (state.requireServiceKey && req.headers['x-internal-service-key'] !== 'test_service_key') {
+        return send(401, { success: false, message: 'Bad service key' });
+      }
+      let body = '';
+      req.on('data', (c) => (body += c));
+      return req.on('end', () => {
+        const parsed = body ? JSON.parse(body) : {};
+        state.videoCalls.push({ method: req.method, path: url.pathname, query: url.search, body: parsed });
+        if (state.videoReject) {
+          const r = state.videoReject;
+          state.videoReject = null;
+          return send(r.status, { success: false, error: { code: r.code, message: r.message } });
+        }
+        if (url.pathname === '/api/internal/lesson-videos/courses') {
+          const slugs = (url.searchParams.get('slugs') || '').split(',').filter(Boolean);
+          return send(200, {
+            success: true,
+            data: slugs.map((slug) => ({ slug, title: slug.toUpperCase(), lessonCount: 2, videoCount: 0, publishedVideoCount: 0 })),
+          });
+        }
+        if (url.pathname === '/api/internal/lesson-videos/inspect') {
+          return send(200, { success: true, data: { videoId: 'dQw4w9WgXcQ', availability: 'available' } });
+        }
+        const node = url.pathname.match(/^\/api\/internal\/lesson-videos\/courses\/([^/]+)\/(lessons|modules)\/([^/]+)$/);
+        const nodeIds = node ? (node[2] === 'modules' ? { moduleId: node[3] } : { lessonId: node[3] }) : null;
+        if (node && req.method === 'PUT') {
+          return send(200, {
+            success: true,
+            data: { ...nodeIds, previousVideoId: null, video: { videoId: 'dQw4w9WgXcQ', isPublished: Boolean(parsed.isPublished) } },
+          });
+        }
+        if (node && req.method === 'DELETE') {
+          return send(200, { success: true, data: { ...nodeIds, removed: true, previousVideoId: 'dQw4w9WgXcQ' } });
+        }
+        const course = url.pathname.match(/^\/api\/internal\/lesson-videos\/courses\/([^/]+)$/);
+        if (course) return send(200, { success: true, data: { slug: course[1], modules: [] } });
+        return send(404, { success: false });
+      });
+    }
+
     // Every other bridge call (announcements, materials, ...) is a best-effort
     // side channel that must never fail the action that triggered it.
     return send(200, { success: true, data: null });
@@ -212,6 +257,8 @@ async function startFakeStudentPortal() {
       state.lookupIgnoresScope = false;
       state.lookups = [];
       state.calls = [];
+      state.videoCalls = [];
+      state.videoReject = null;
     },
     close: () => new Promise((resolve) => server.close(resolve)),
   };

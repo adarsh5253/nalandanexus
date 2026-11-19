@@ -2,8 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { BookOpen, Users, Star, Plus, ShieldCheck, IndianRupee, X } from 'lucide-react';
 import { teacherApiService, ApiClientError } from '../services/teacherApiService';
 import { socketService } from '../services/socketService';
+import CourseRosterModal from '../components/courses/CourseRosterModal';
 
 const STATUS_LABEL = {
+  ASSIGNED: 'Assigned',
   DRAFT: 'Draft',
   PENDING_REVIEW: 'Pending Review',
   APPROVED: 'Approved',
@@ -12,6 +14,7 @@ const STATUS_LABEL = {
 };
 
 const STATUS_STYLE = {
+  ASSIGNED: 'bg-[#22355E]/10 text-[#22355E] border-[#22355E]/30',
   DRAFT: 'bg-[#9B9690]/15 text-[#6E6A64] border-[#9B9690]/30',
   PENDING_REVIEW: 'bg-[#C99A2E]/15 text-[#C99A2E] border-[#C99A2E]/30',
   APPROVED: 'bg-[#5C7A5E]/15 text-[#5C7A5E] border-[#5C7A5E]/30',
@@ -29,6 +32,9 @@ export default function CoursesPage() {
   const [assignedCourses, setAssignedCourses] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // The assigned course whose enrolled students are open, or null.
+  const [rosterCourse, setRosterCourse] = useState(null);
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [createForm, setCreateForm] = useState({ title: '', category: '' });
@@ -61,9 +67,15 @@ export default function CoursesPage() {
     socketService.connect();
     const unbindAssigned = socketService.on('course.assigned', fetchAll);
     const unbindUnassigned = socketService.on('course.unassigned', fetchAll);
+    // A catalogue course added or taken away, or students enrolling in one: the
+    // counts on these cards follow.
+    const unbindAccess = socketService.on('course.access_changed', fetchAll);
+    const unbindRoster = socketService.on('course.roster_updated', fetchAll);
     return () => {
       unbindAssigned();
       unbindUnassigned();
+      unbindAccess();
+      unbindRoster();
     };
   }, [fetchAll]);
 
@@ -153,13 +165,34 @@ export default function CoursesPage() {
                       <p className="text-xs text-[#6E6A64] mt-1.5 line-clamp-2">{course.description}</p>
                     )}
                   </div>
-                  <div className="flex items-center justify-between mt-4 pt-3 border-t border-[#E8E4DA]">
-                    <span className="flex items-center gap-1 text-xs font-bold text-[#22355E]">
-                      <IndianRupee className="w-3.5 h-3.5" />
-                      {formatPrice(course.priceInPaise).replace('₹', '')}
-                    </span>
-                    <span className="text-[10px] text-[#9B9690]">Access via assignment — no purchase required</span>
+                  <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-[#E8E4DA]">
+                    {course.kind === 'catalogue' ? (
+                      <span className="flex items-center gap-1 text-xs font-bold text-[#22355E]">
+                        <Users className="w-3.5 h-3.5" />
+                        {course.studentCount ?? 0} enrolled
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-xs font-bold text-[#22355E]">
+                        <IndianRupee className="w-3.5 h-3.5" />
+                        {formatPrice(course.priceInPaise).replace('₹', '')}
+                      </span>
+                    )}
+                    {course.studentCourseSlug ? (
+                      <button
+                        type="button"
+                        onClick={() => setRosterCourse(course)}
+                        className="text-[11px] font-bold text-[#AB5236] hover:underline flex items-center gap-1"
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        View students{course.kind !== 'catalogue' && course.studentCount != null ? ` (${course.studentCount})` : ''}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-[#9B9690]">Access via assignment — no purchase required</span>
+                    )}
                   </div>
+                  {course.rosterSyncStatus === 'failed' && (
+                    <p className="mt-2 text-[10px] text-[#C1352B]">The student list could not be loaded from the student portal yet — open it and press Refresh.</p>
+                  )}
                 </div>
               </div>
             ))}
@@ -282,6 +315,8 @@ export default function CoursesPage() {
           </div>
         </div>
       )}
+
+      <CourseRosterModal course={rosterCourse} isOpen={Boolean(rosterCourse)} onClose={() => setRosterCourse(null)} onChanged={fetchAll} />
     </div>
   );
 }

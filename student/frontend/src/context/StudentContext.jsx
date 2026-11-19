@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from './AuthContext';
 import { studentApiService } from '../services/studentApiService';
 import { connectSocket, disconnectSocket } from '../services/socket';
@@ -116,48 +116,88 @@ export function StudentProvider({ children }) {
   // socket payload itself is never rendered directly).
   const [leaderboardVersion, setLeaderboardVersion] = useState(0);
 
+  // The in-flight load, so a second trigger (a socket event arriving while the
+  // first load runs, a remount, a retry pressed twice) joins the request
+  // already travelling instead of starting a duplicate one.
+  const inFlightLoad = useRef(null);
+
   const loadDashboard = useCallback(async () => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) return undefined;
+    if (inFlightLoad.current) return inFlightLoad.current;
+
     setIsLoadingDashboard(true);
     setDashboardError(null);
-    try {
-      const data = await studentApiService.getDashboard();
-      setProfile(data.profile);
-      setCourse(data.course);
-      setIsEnrolled(Boolean(data.isEnrolledInAnyCourse));
-      setProfileCompletion(data.profileCompletion || null);
-      setNotifications((data.notifications || []).map(mapNotification));
-      // Already shaped as { day, quiz, task, average } by the backend -
-      // matches what PerformanceChart (Recharts) expects directly.
-      setPerformanceHistory(data.performanceTrend || []);
 
-      // Full task catalog (dashboard only returns a due-soon slice) so
-      // TasksListPage can show completed + pending tasks with real state.
-      if (data.isEnrolledInAnyCourse) {
+    const run = (async () => {
+      try {
+        const data = await studentApiService.getDashboard();
+        setProfile(data.profile);
+        setCourse(data.course);
+        setIsEnrolled(Boolean(data.isEnrolledInAnyCourse));
+        setProfileCompletion(data.profileCompletion || null);
+        setNotifications((data.notifications || []).map(mapNotification));
+        // Already shaped as { day, quiz, task, average } by the backend -
+        // matches what PerformanceChart (Recharts) expects directly.
+        setPerformanceHistory(data.performanceTrend || []);
+
+        // The dashboard is on screen at this point. Everything below is
+        // secondary data for other screens, and none of the three requests
+        // depends on another's answer - they used to run one after the next,
+        // so the slowest path to a usable dashboard was four serial round
+        // trips (dashboard -> tasks -> courses -> notes) rather than two.
+        //
+        // `allSettled`, not `all`: a failed notes fetch must not discard the
+        // tasks that did arrive, nor mark the whole dashboard as failed when
+        // the dashboard itself loaded fine.
+        const enrolled = Boolean(data.isEnrolledInAnyCourse);
         // Tasks are course content, which waits for a complete profile - asking
         // for them first would only be refused.
-        const allTasks = data.profileCompletion?.requiresCompletion ? [] : await studentApiService.getTasks();
-        setTasks(
-          allTasks.map((t) => ({
-            ...t,
-            dueDateLabel: t.urgency === 'high' ? 'Due soon' : t.urgency === 'medium' ? 'This week' : 'Flexible',
-            dueIsoDate: t.dueDate ? new Date(t.dueDate).toISOString().slice(0, 10) : null,
-          }))
-        );
-        const myCourses = await studentApiService.getCourses();
-        setCourses(myCourses.map((c) => ({ slug: c.slug, title: c.title })));
-      } else {
-        setTasks([]);
-        setCourses([]);
-      }
+        const wantsTasks = enrolled && !data.profileCompletion?.requiresCompletion;
 
-      const myNotes = await studentApiService.getNotes();
-      setNotes(myNotes.map(mapNote));
-    } catch (err) {
-      setDashboardError(err.message || 'Unable to load your dashboard.');
-    } finally {
-      setIsLoadingDashboard(false);
-    }
+        const [tasksResult, coursesResult, notesResult] = await Promise.allSettled([
+          wantsTasks ? studentApiService.getTasks() : Promise.resolve([]),
+          enrolled ? studentApiService.getCourses() : Promise.resolve([]),
+          studentApiService.getNotes(),
+        ]);
+
+        if (tasksResult.status === 'fulfilled') {
+          setTasks(
+            (tasksResult.value || []).map((t) => ({
+              ...t,
+              dueDateLabel: t.urgency === 'high' ? 'Due soon' : t.urgency === 'medium' ? 'This week' : 'Flexible',
+              dueIsoDate: t.dueDate ? new Date(t.dueDate).toISOString().slice(0, 10) : null,
+            }))
+          );
+        }
+        if (coursesResult.status === 'fulfilled') {
+          setCourses((coursesResult.value || []).map((c) => ({ slug: c.slug, title: c.title })));
+        }
+        if (notesResult.status === 'fulfilled') {
+          setNotes((notesResult.value || []).map(mapNote));
+        }
+
+        // A secondary request that failed is reported, not hidden - but only
+        // when the dashboard itself has nothing wrong with it, so the primary
+        // error message is never overwritten by a lesser one.
+        const firstSecondaryFailure = [tasksResult, coursesResult, notesResult].find(
+          (r) => r.status === 'rejected' && r.reason?.code !== 'CANCELLED'
+        );
+        if (firstSecondaryFailure) {
+          console.warn('[StudentContext] Secondary dashboard data failed to load:', firstSecondaryFailure.reason);
+        }
+      } catch (err) {
+        if (err?.code === 'CANCELLED') return;
+        // The ApiError itself, not just its text: the gate and the pages read
+        // `.code`/`.status` off it to decide whether a retry is worth offering.
+        setDashboardError(err instanceof Error ? err : new Error(String(err)));
+      } finally {
+        setIsLoadingDashboard(false);
+        inFlightLoad.current = null;
+      }
+    })();
+
+    inFlightLoad.current = run;
+    return run;
   }, [isAuthenticated]);
 
   useEffect(() => {
@@ -239,7 +279,12 @@ export function StudentProvider({ children }) {
 
   useEffect(() => disconnectSocket, []);
 
-  const student = mapToStudentViewModel(user, profile, course);
+  // Rebuilt only when its inputs change. It used to be recomputed on every
+  // render of the provider, which produced a new object identity each time -
+  // so every component reading `student` re-rendered on any unrelated state
+  // change here (a notification arriving, a note being saved), and any child
+  // memoised on `student` was never actually spared any work.
+  const student = useMemo(() => mapToStudentViewModel(user, profile, course), [user, profile, course]);
 
   const completeOnboarding = useCallback(async () => {
     const { profile: updated } = await studentApiService.completeOnboarding();
@@ -307,37 +352,81 @@ export function StudentProvider({ children }) {
     setNotes((prev) => prev.filter((n) => n.id !== noteId));
   }, []);
 
-  const unreadNotificationsCount = notifications.filter((n) => !n.isRead).length;
+  const unreadNotificationsCount = useMemo(
+    () => notifications.filter((n) => !n.isRead).length,
+    [notifications]
+  );
+  const pendingTasks = useMemo(() => tasks.filter((t) => !t.isCompleted), [tasks]);
 
-  const value = {
-    student,
-    profileLoaded: Boolean(profile),
-    tasks,
-    pendingTasks: tasks.filter((t) => !t.isCompleted),
-    performanceHistory,
-    notifications,
-    unreadNotificationsCount,
-    notes,
-    journeyStages: parambhJourneyStages,
-    leaderboardVersion,
-    course,
-    courses,
-    isEnrolled,
-    profileCompletion,
-    requiresProfileCompletion: Boolean(profileCompletion?.requiresCompletion),
-    isLoadingDashboard,
-    dashboardError,
-    activeNotification,
-    completeTask,
-    submitQuiz,
-    markNotificationsRead,
-    getLeaderboard,
-    saveNote,
-    deleteNote,
-    refreshData,
-    hasCompletedOnboarding,
-    completeOnboarding,
-  };
+  /**
+   * Memoised so the provider does not hand every consumer a brand-new object
+   * on each render.
+   *
+   * A context value rebuilt inline is a new identity every render, which makes
+   * `useContext` fire in every subscriber regardless of what actually changed -
+   * about twenty dashboard components re-rendering because an unrelated note
+   * was saved. The dependency list is the full set of values and callbacks
+   * below; the callbacks are already `useCallback`-stable, so in practice this
+   * only changes identity when real data does.
+   */
+  const value = useMemo(
+    () => ({
+      student,
+      profileLoaded: Boolean(profile),
+      tasks,
+      pendingTasks,
+      performanceHistory,
+      notifications,
+      unreadNotificationsCount,
+      notes,
+      journeyStages: parambhJourneyStages,
+      leaderboardVersion,
+      course,
+      courses,
+      isEnrolled,
+      profileCompletion,
+      requiresProfileCompletion: Boolean(profileCompletion?.requiresCompletion),
+      isLoadingDashboard,
+      dashboardError,
+      activeNotification,
+      completeTask,
+      submitQuiz,
+      markNotificationsRead,
+      getLeaderboard,
+      saveNote,
+      deleteNote,
+      refreshData,
+      hasCompletedOnboarding,
+      completeOnboarding,
+    }),
+    [
+      student,
+      profile,
+      tasks,
+      pendingTasks,
+      performanceHistory,
+      notifications,
+      unreadNotificationsCount,
+      notes,
+      leaderboardVersion,
+      course,
+      courses,
+      isEnrolled,
+      profileCompletion,
+      isLoadingDashboard,
+      dashboardError,
+      activeNotification,
+      completeTask,
+      submitQuiz,
+      markNotificationsRead,
+      getLeaderboard,
+      saveNote,
+      deleteNote,
+      refreshData,
+      hasCompletedOnboarding,
+      completeOnboarding,
+    ]
+  );
 
   return <StudentContext.Provider value={value}>{children}</StudentContext.Provider>;
 }

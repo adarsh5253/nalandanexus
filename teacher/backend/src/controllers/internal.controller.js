@@ -3,7 +3,9 @@ import { sendSuccess } from '../utils/ApiResponse.js';
 import { resolveTeacherForCourseSlug, deliverExternalStudentMessage } from '../services/externalMessage.service.js';
 import { placeEnrollment } from '../services/batchPlacement.service.js';
 import * as adminBatch from '../services/adminBatch.service.js';
-import { createTeacherAccount, resetCredentials, setAccountStatus } from '../services/auth.service.js';
+import { createTeacherAccount, issuePasswordSetupLink, resetCredentials, setAccountStatus } from '../services/auth.service.js';
+import { setTeacherCourses } from '../services/courseRoster.service.js';
+import { env } from '../config/env.js';
 import { assignCourse, unassignCourse } from '../services/assignedCourse.service.js';
 import { AdminAnnouncement } from '../models/AdminAnnouncement.js';
 import { Teacher } from '../models/Teacher.js';
@@ -57,26 +59,58 @@ export const getTeacherForCourse = catchAsync(async (req, res) => {
 
 /**
  * Called by admin/backend right after it creates its own governance Teacher
- * record, to actually provision the real login here. `tempPassword` is
- * plaintext in this request body deliberately — it travels only over this
- * server-to-server, shared-secret-authenticated channel, never a
- * public/user-facing endpoint. `mustChangePassword: true` is hardcoded here
- * (never client-supplied) so this path can only ever create a
- * forced-reset account, matching the master doc's mandatory first-login flow.
+ * record, to actually provision the real login here.
+ *
+ * Admin sends the SHA-256 of a setup-link token and its expiry; no password
+ * travels at all, and the account is given a random one nobody knows. The
+ * person chooses their own through the emailed link (auth.service.js
+ * #completePasswordSetup). The older `tempPassword` form is still accepted so an
+ * Admin deployment that has not been updated keeps working; `mustChangePassword`
+ * is derived here, never client-supplied, so that path can only ever create a
+ * forced-reset account.
  */
 export const provisionTeacher = catchAsync(async (req, res) => {
-  const { name, email, phone, tempPassword, title, department, subject } = req.body;
+  const { name, email, phone, tempPassword, title, department, subject, teacherId: requestedTeacherId, avatarUrl, setupTokenHash, setupTokenExpiresAt } = req.body;
+  const setup = setupTokenHash ? { tokenHash: setupTokenHash, expiresAt: new Date(setupTokenExpiresAt) } : null;
   const { user, teacher } = await createTeacherAccount({
     name,
     email,
-    password: tempPassword,
+    // With a setup link the account is given a random password nobody knows and
+    // the person chooses their own; the legacy temp-password path still forces a
+    // change at first login.
+    password: setup ? undefined : tempPassword,
     phone,
     title,
     department,
     subject,
-    mustChangePassword: true,
+    requestedTeacherId,
+    avatarUrl,
+    setup,
+    mustChangePassword: !setup,
   });
-  sendSuccess(res, { statusCode: 201, message: 'Teacher account provisioned.', data: { userId: user._id, teacherId: teacher._id } });
+  sendSuccess(res, {
+    statusCode: 201,
+    message: 'Teacher account provisioned.',
+    // The Teacher ID actually issued (it can differ from the one requested) and
+    // where this portal lives, so the onboarding email links to the real login
+    // page rather than to this API.
+    data: { userId: user._id, teacherId: teacher._id, teacherCode: teacher.teacherId, portalUrl: portalUrl() },
+  });
+});
+
+/** The Teacher Portal's own address - CLIENT_URL here is the origin its frontend is served from. */
+function portalUrl() {
+  return String(env.clientUrl || '').split(',')[0].trim().replace(/\/+$/, '') || null;
+}
+
+/**
+ * Replaces the set of courses an administrator has assigned to one teacher, and
+ * starts loading the students enrolled in any newly added course. A teacher who
+ * is not found is an outcome, not an error - Admin reports it as a warning.
+ */
+export const setCoursesForTeacher = catchAsync(async (req, res) => {
+  const result = await setTeacherCourses({ teacherEmail: req.body.teacherEmail, courses: req.body.courses });
+  sendSuccess(res, { message: result.updated ? 'Courses assigned.' : 'Not assigned.', data: result });
 });
 
 export const deliverMessage = catchAsync(async (req, res) => {
@@ -95,9 +129,16 @@ export const deliverMessage = catchAsync(async (req, res) => {
  * cosmetic governance-record copy that admin updates on its own side.
  */
 export const resetTeacherCredentials = catchAsync(async (req, res) => {
-  const { email, newPassword } = req.body;
-  const { user, teacher } = await resetCredentials({ email, newPassword });
-  sendSuccess(res, { message: 'Teacher credentials reset.', data: { userId: user._id, teacherId: teacher._id } });
+  const { email, newPassword, setupTokenHash, setupTokenExpiresAt } = req.body;
+  // A setup link replaces the pending one and changes nothing else; the legacy
+  // temp-password reset is kept only so an older Admin deployment still works.
+  const { user, teacher } = setupTokenHash
+    ? await issuePasswordSetupLink({ email, tokenHash: setupTokenHash, expiresAt: new Date(setupTokenExpiresAt) })
+    : await resetCredentials({ email, newPassword });
+  sendSuccess(res, {
+    message: setupTokenHash ? 'Password setup link issued.' : 'Teacher credentials reset.',
+    data: { userId: user._id, teacherId: teacher._id, teacherCode: teacher.teacherId, portalUrl: portalUrl() },
+  });
 });
 
 /**

@@ -39,11 +39,14 @@ const ATTEMPT_TIMEOUTS_MS = [8000, 35000, 35000];
 const RETRY_BACKOFF_MS = [1000, 3000];
 
 class BridgeError extends Error {
-  constructor(message, { status = 0, retryable = false } = {}) {
+  constructor(message, { status = 0, retryable = false, body } = {}) {
     super(message);
     this.name = 'BridgeError';
     this.status = status;
     this.retryable = retryable;
+    // The whole response body. The message keeps a short excerpt for logs;
+    // callers that unwrap a 4xx read this, so a long answer is not cut mid-JSON.
+    this.body = body;
   }
 }
 
@@ -60,6 +63,7 @@ async function attempt(path, options, timeoutMs) {
       const body = await res.text().catch(() => '');
       throw new BridgeError(`Student backend returned ${res.status}: ${body.slice(0, 200)}`, {
         status: res.status,
+        body,
         // 5xx and 429 are the peer struggling; 4xx is the peer answering.
         retryable: res.status >= 500 || res.status === 429,
       });
@@ -231,15 +235,19 @@ async function couponCall(path, options) {
     const match = /returned (\d{3}):\s*([\s\S]*)$/.exec(err.message);
     const status = Number(match?.[1]);
     if (status >= 400 && status < 500) {
-      let message = match?.[2] || err.message;
+      let message = typeof err.body === 'string' && err.body ? err.body : match?.[2] || err.message;
       // This leg is shared by coupons, progression config and eligibility, so
       // the fallback names the transport rather than one of its passengers -
       // "COUPON_REJECTED" on a stage-eligibility call was simply wrong.
       let code = 'STUDENT_SERVICE_REJECTED';
+      let details;
       try {
         const body = JSON.parse(message);
         message = body?.error?.message || body?.message || message;
         code = body?.error?.code || body?.code || code;
+        // Carried through so a caller can act on it - e.g. a 409 naming the
+        // version of a lesson video that is current now.
+        details = body?.error?.details;
       } catch {
         // Not JSON - the raw text is still better than nothing.
       }
@@ -248,7 +256,7 @@ async function couponCall(path, options) {
       // missing record or a refusal, and collapsing all three lost a
       // distinction the caller can act on - a 404 and a validation failure need
       // different handling, and only the code survived to tell them apart.
-      throw new ApiError(status, message, code);
+      throw new ApiError(status, message, code, details);
     }
     console.error('[studentCourseBridge] Coupon administration failed:', err.message);
     throw couponsUnavailable();
@@ -405,6 +413,59 @@ export async function setContentSubjects(slug, payload) {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
+  return body?.data || null;
+}
+
+/**
+ * Lesson videos, proxied to the service that owns lessons.
+ *
+ * The student service validates every link itself (one parser, one set of
+ * error codes) and its 4xx answers - an unsupported link, an unknown lesson, a
+ * video YouTube says does not exist - reach the admin unchanged. Only a
+ * transport failure becomes 503, worded for videos rather than coupons.
+ */
+async function videoCall(path, options) {
+  try {
+    return await couponCall(path, options);
+  } catch (err) {
+    if (err?.code === 'STUDENT_SERVICE_UNAVAILABLE') {
+      throw ApiError.serviceUnavailable(
+        'The Student service is unavailable, so lesson videos cannot be loaded or saved right now. Nothing was changed - please try again in a moment.',
+        'STUDENT_SERVICE_UNAVAILABLE'
+      );
+    }
+    throw err;
+  }
+}
+
+// A video belongs to one lesson or one module: { lessonId } or { moduleId }.
+const videoPath = (slug, target) =>
+  `/api/internal/lesson-videos/courses/${encodeURIComponent(slug)}/${
+    target.moduleId ? `modules/${encodeURIComponent(target.moduleId)}` : `lessons/${encodeURIComponent(target.lessonId)}`
+  }`;
+
+export async function listLessonVideoCourses() {
+  const body = await videoCall('/api/internal/lesson-videos/courses', { method: 'GET' });
+  return body?.data || [];
+}
+
+export async function getLessonVideos(slug) {
+  const body = await videoCall(`/api/internal/lesson-videos/courses/${encodeURIComponent(slug)}`, { method: 'GET' });
+  return body?.data || null;
+}
+
+export async function inspectLessonVideo(url) {
+  const body = await videoCall('/api/internal/lesson-videos/inspect', { method: 'POST', body: JSON.stringify({ url }) });
+  return body?.data || null;
+}
+
+export async function saveCourseVideo(slug, target, payload) {
+  const body = await videoCall(videoPath(slug, target), { method: 'PUT', body: JSON.stringify(payload) });
+  return body?.data || null;
+}
+
+export async function removeCourseVideo(slug, target, payload) {
+  const body = await videoCall(videoPath(slug, target), { method: 'DELETE', body: JSON.stringify(payload) });
   return body?.data || null;
 }
 

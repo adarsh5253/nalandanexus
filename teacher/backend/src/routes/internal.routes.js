@@ -13,6 +13,7 @@ import {
   deliverMessageValidator,
   provisionTeacherValidator,
   resetCredentialsValidator,
+  setTeacherCoursesValidator,
   setAccountStatusValidator,
   assignCourseValidator,
   sourceIdParamValidator,
@@ -47,6 +48,8 @@ router.get('/batches/:id/students', objectIdParam('id'), validate, internalContr
 router.post('/messages', deliverMessageValidator, validate, internalController.deliverMessage);
 router.post('/teachers', provisionTeacherValidator, validate, internalController.provisionTeacher);
 router.patch('/teachers/credentials', resetCredentialsValidator, validate, internalController.resetTeacherCredentials);
+// The full set of courses assigned to one teacher (replaces). Visibility of each course's students follows from it.
+router.put('/teachers/courses', setTeacherCoursesValidator, validate, internalController.setCoursesForTeacher);
 router.patch('/teachers/status', setAccountStatusValidator, validate, internalController.setTeacherAccountStatus);
 router.put('/courses/:sourceId', sourceIdParamValidator, assignCourseValidator, validate, internalController.upsertAssignedCourse);
 router.delete('/courses/:sourceId', sourceIdParamValidator, validate, internalController.removeAssignedCourse);

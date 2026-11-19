@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Award, Trophy, ArrowUpRight, Flame, Sparkles } from 'lucide-react';
 import { useStudent } from '../../context/StudentContext';
+import ErrorState from '../common/ErrorState';
+import { TableSkeleton } from '../common/Skeletons';
 
 export default function LeaderboardSection() {
   const { student, course, courses, getLeaderboard, leaderboardVersion } = useStudent();
@@ -10,6 +12,8 @@ export default function LeaderboardSection() {
   const [courseSlug, setCourseSlug] = useState(course?.id || '');
   const [currentLeaderboard, setCurrentLeaderboard] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const points = student?.points ?? 0;
 
@@ -21,9 +25,18 @@ export default function LeaderboardSection() {
     if (activeTab !== 'leaderboard' || !courseSlug) return undefined;
     let cancelled = false;
     setIsLoading(true);
+    setError(null);
     getLeaderboard(leaderboardPeriod, courseSlug)
       .then((entries) => {
         if (!cancelled) setCurrentLeaderboard(entries);
+      })
+      // Without this, a failed request rejected into nothing: an unhandled
+      // promise rejection in the console, and a panel that claimed there was
+      // "no activity this period" when the request had actually failed.
+      .catch((err) => {
+        if (cancelled || err?.code === 'CANCELLED') return;
+        setError(err);
+        setCurrentLeaderboard([]);
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -31,7 +44,9 @@ export default function LeaderboardSection() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, leaderboardPeriod, courseSlug, getLeaderboard, leaderboardVersion]);
+  }, [activeTab, leaderboardPeriod, courseSlug, getLeaderboard, leaderboardVersion, reloadKey]);
+
+  const retryLeaderboard = useCallback(() => setReloadKey((k) => k + 1), []);
 
   return (
     <section aria-labelledby="leaderboard-heading">
@@ -170,9 +185,16 @@ export default function LeaderboardSection() {
               </button>
             </div>
 
-            {/* Ranking List */}
-            {isLoading ? (
-              <div className="p-6 text-center text-xs text-[#2B2B28]/60">Loading leaderboard…</div>
+            {/* Ranking List. Loading, failed and empty are three different
+                answers and are shown as three different things. */}
+            {error ? (
+              <ErrorState compact error={error} onRetry={retryLeaderboard} />
+            ) : isLoading ? (
+              <TableSkeleton rows={5} title={false} />
+            ) : !courseSlug ? (
+              <div className="p-6 text-center text-xs text-[#2B2B28]/60">
+                Leaderboards are per course — enroll in a course to see where you stand.
+              </div>
             ) : currentLeaderboard.length === 0 ? (
               <div className="p-6 text-center text-xs text-[#2B2B28]/60">No leaderboard activity yet this period.</div>
             ) : (

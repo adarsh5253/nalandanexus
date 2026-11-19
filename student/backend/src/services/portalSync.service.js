@@ -99,16 +99,29 @@ export async function buildPortalStudentRecord(userId) {
 }
 
 /**
- * What the teacher portal receives: identity, and each enrolment's id, status
- * and batch - enough to update and verify the roster rows placement created,
- * and nothing about courses it does not teach or what anything cost.
+ * What the teacher portal receives: identity, and each enrolment's id, status,
+ * batch and course slug - enough to update and verify the roster rows placement
+ * created, and to place the student on the course-wide roster of any teacher
+ * assigned that course. Never a course title or what anything cost.
+ *
+ * The slug is catalogue information (it is in every public course URL), and the
+ * teacher portal keeps an enrolment only for a course it has a teacher assigned
+ * to - it drops the rest on arrival. It is sent for every enrolment because this
+ * portal cannot know which courses a teacher has been given.
  */
 function forTeacher(record) {
   return {
     ...record,
     enrollments: record.enrollments
       .filter((e) => e.enrollmentId)
-      .map((e) => ({ enrollmentId: e.enrollmentId, status: e.status, batchId: e.batchId, enrolledAt: e.enrolledAt })),
+      .map((e) => ({
+        enrollmentId: e.enrollmentId,
+        status: e.status,
+        batchId: e.batchId,
+        batchCode: e.batchCode,
+        courseSlug: e.courseSlug,
+        enrolledAt: e.enrolledAt,
+      })),
   };
 }
 

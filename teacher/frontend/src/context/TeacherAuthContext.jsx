@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { socketService } from '../services/socketService';
 import { teacherApiService, ApiClientError, onSessionExpired } from '../services/teacherApiService';
 
@@ -112,20 +112,28 @@ export function TeacherAuthProvider({ children }) {
     }
   }, []);
 
-  const value = {
-    user,
-    isAuthenticated: Boolean(user),
-    mustChangePassword: Boolean(user?.mustChangePassword),
-    isLoading,
-    isAuthenticating,
-    error,
-    login,
-    logout,
-    logoutAllDevices,
-    changePassword,
-    refreshUser,
-    setUser,
-  };
+  // Memoised so the provider does not hand every consumer a new object on each
+  // render: a context value rebuilt inline has a fresh identity every time,
+  // which makes `useContext` fire in every subscriber regardless of whether
+  // anything it reads actually changed. The callbacks below are all
+  // `useCallback`-stable, so this only changes when real session state does.
+  const value = useMemo(
+    () => ({
+      user,
+      isAuthenticated: Boolean(user),
+      mustChangePassword: Boolean(user?.mustChangePassword),
+      isLoading,
+      isAuthenticating,
+      error,
+      login,
+      logout,
+      logoutAllDevices,
+      changePassword,
+      refreshUser,
+      setUser,
+    }),
+    [user, isLoading, isAuthenticating, error, login, logout, logoutAllDevices, changePassword, refreshUser]
+  );
 
   return <TeacherAuthContext.Provider value={value}>{children}</TeacherAuthContext.Provider>;
 }

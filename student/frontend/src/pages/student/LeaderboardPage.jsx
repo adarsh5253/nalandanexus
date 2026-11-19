@@ -1,14 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, Trophy, Flame } from 'lucide-react';
 import { useStudent } from '../../context/StudentContext';
+import ErrorState from '../../components/common/ErrorState';
+import { TableSkeleton } from '../../components/common/Skeletons';
 
 export default function LeaderboardPage() {
-  const { student, course, courses, getLeaderboard, leaderboardVersion } = useStudent();
+  const { student, course, courses, getLeaderboard, leaderboardVersion, isLoadingDashboard } = useStudent();
   const [period, setPeriod] = useState('thisWeek'); // 'thisWeek' | 'thisMonth' | 'allTime'
   const [courseSlug, setCourseSlug] = useState(course?.id || '');
   const [leaderboard, setLeaderboard] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  // Starts false, not true. It used to start true while the effect below
+  // returned early whenever there was no course slug yet - so a student with
+  // no course sat on "Loading leaderboard…" permanently, with nothing in
+  // flight to ever clear it. The flag is now only ever true while a request
+  // really is running.
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!courseSlug && course?.id) setCourseSlug(course.id);
@@ -21,9 +30,19 @@ export default function LeaderboardPage() {
     if (!courseSlug) return undefined;
     let cancelled = false;
     setIsLoading(true);
+    setError(null);
     getLeaderboard(period, courseSlug)
       .then((entries) => {
         if (!cancelled) setLeaderboard(entries);
+      })
+      // Without this, a failed request rejected into nothing: an unhandled
+      // promise rejection in the console, and - because `.finally` still
+      // cleared the flag - a screen that reported "No leaderboard activity
+      // yet" when the truth was that the request had failed.
+      .catch((err) => {
+        if (cancelled || err?.code === 'CANCELLED') return;
+        setError(err);
+        setLeaderboard([]);
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -31,7 +50,9 @@ export default function LeaderboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [period, courseSlug, getLeaderboard, leaderboardVersion]);
+  }, [period, courseSlug, getLeaderboard, leaderboardVersion, reloadKey]);
+
+  const retry = useCallback(() => setReloadKey((k) => k + 1), []);
 
   return (
     <div className="w-full min-h-screen bg-[#EDEAE0] p-4 sm:p-6 lg:p-8">
@@ -106,9 +127,20 @@ export default function LeaderboardPage() {
           </div>
         </div>
 
-        {/* Full Ranking Table */}
-        {isLoading ? (
-          <div className="p-8 text-center text-xs text-[#2B2B28]/60">Loading leaderboard…</div>
+        {/* Full Ranking Table. Four distinct states, never conflated:
+            loading, failed, no course to rank in, and genuinely empty. */}
+        {error ? (
+          <div className="bg-[#FAF9F4] border border-[#DFDACB] rounded-2xl py-6">
+            <ErrorState title="Couldn't load the leaderboard" error={error} onRetry={retry} />
+          </div>
+        ) : isLoading ? (
+          <TableSkeleton rows={8} title={false} />
+        ) : !courseSlug ? (
+          <div className="p-8 text-center text-xs text-[#2B2B28]/60 bg-[#FAF9F4] border border-[#DFDACB] rounded-2xl">
+            {isLoadingDashboard
+              ? 'Finding your course…'
+              : 'Leaderboards are per course — enroll in a course to see where you stand.'}
+          </div>
         ) : leaderboard.length === 0 ? (
           <div className="p-8 text-center text-xs text-[#2B2B28]/60 bg-[#FAF9F4] border border-[#DFDACB] rounded-2xl">
             No leaderboard activity yet for this period.

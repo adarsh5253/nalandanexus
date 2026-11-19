@@ -31,6 +31,12 @@ const assignedCourseSchema = new Schema(
     priceInPaise: { type: Number, default: 0, min: 0 },
     status: { type: String, default: 'PENDING_REVIEW', trim: true },
 
+    // The student catalogue slug this course is sold under, when it has one. Being
+    // its instructor then also gives this teacher its enrolled students (see
+    // services/courseRoster.service.js). No default: absent means "not sold under
+    // a slug".
+    studentCourseSlug: { type: String, trim: true, lowercase: true },
+
     assignedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
